@@ -1,0 +1,64 @@
+{
+    "name": "@schmitech/chatbot-api",
+    "private": false,
+    "version": "2.2.0",
+    "description": "API client for the ORBIT MCP server",
+    "type": "module",
+    "main": "./dist/api.cjs",
+    "module": "./dist/api.mjs",
+    "types": "./dist/api.d.ts",
+    "exports": {
+        ".": {
+            "import": {
+                "types": "./dist/api.d.ts",
+                "default": "./dist/api.mjs"
+            },
+            "require": {
+                "types": "./dist/api.d.ts",
+                "default": "./dist/api.cjs"
+            }
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "build:chat-app": "vite build && mkdir -p ../chat-app/src/api/local && cp dist/api.mjs ../chat-app/src/api/local/api.mjs && cp dist/api.mjs.map ../chat-app/src/api/local/api.mjs.map && cp dist/api.d.ts ../chat-app/src/api/local/api.d.ts",
+        "lint": "eslint .",
+        "preview": "vite preview",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:npm": "node ./test/test-npm-package.mjs",
+        "test-query": "node ./test/run-query.js",
+        "test-query-from-pairs": "node ./test/run-query-from-pairs.js",
+        "test:live": "node ./test/live-integration.mjs"
+    },
+    "dependencies": {},
+    "devDependencies": {
+        "@eslint/js": "^9.9.1",
+        "@types/node": "^20.11.24",
+        "eslint": "^9.9.1",
+        "globals": "^15.9.0",
+        "msw": "^2.0.11",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.5.3",
+        "typescript-eslint": "^8.3.0",
+        "vite": "^5.4.2",
+        "vite-plugin-dts": "^4.3.0",
+        "vitest": "^0.34.6"
+    },
+    "peerDependencies": {
+        "react": ">=16.8.0",
+        "react-dom": ">=16.8.0"
+    },
+    "peerDependenciesMeta": {
+        "react": {
+            "optional": true
+        },
+        "react-dom": {
+            "optional": true
+        }
+    }
+}

@@ -1,0 +1,1214 @@
+# Changelog
+
+## [2.6.7] - 2026-05-08
+
+### Core System Updates
+- Image Generation: End-to-end support for image generation across multiple providers (OpenAI, Gemini/Imagen 4, Ollama, xAI); pipeline integration with image-specific generation steps and file-backed persistence in SQLite; integrated into Chat thread renderer
+- Skills System: Skill discovery and invocation framework (slash-command based picker), persistence in composer, and runtime enrichment of image prompts with conversation/thread context
+- Configuration: Added runtime model selection (`allowed_models`) per adapter for dynamic model overriding; new `image.yaml` for provider configuration
+- Security & Hardening: Magika-based server-side file upload inspection; security patches for rate-limiting, audit-log IP validation, and middleware configuration; cleaned up duplicate logger outputs
+- Refactoring: Extracted client-facing discovery endpoints into `discovery_routes.py`; centralized provider resolution logic in LLM inference
+- Adapters: Eliminated duplicate code by refactoring inheritance patterns (IntentAdapter, HttpAdapter, ChromaQAAdapter, QADocumentAdapter, MultimodalAdapter).
+
+### Chat-app & UI Improvements
+- orbitchat v3.8.0: Major UI updates; rendering of generated images in chat threads; collapsible prompt captions for images; improved chart rendering with new types (radar, funnel, radialbar, horizontal bar); fixed UI regressions (dark mode backgrounds for charts/renderers, persona text field expansion, x-axis label overlaps)
+- orbitchat 3.8.2: Published latest release with UI improvements.
+
+### Bug Fixes & Technical Improvements
+- Context Management: Resolved thread context loss by fixing session ID tracking; fixed history context issues during model switching
+- Performance & Correctness: Fixed Elasticsearch logs example; updated customer order samples; invalidated persona caches on admin mutations
+- Linting/Deps: Resolved ESLint errors; updated/fixed Gemini TTS model integration; fixed OpenAI GPT Image request parameters
+- HTTPS: Hardened TLS configuration, fixed HSTS header logic, added validation for certificates and key files, and added support for passphrase-protected private keys.
+- Hook Reliability: Fixed hook review issues across chat agent selection, autocomplete, skills, voice, and focus trap; improved transcript handling and cleanup.
+
+### Documentation & Configuration
+- README: Improved overall content quality and clarity.
+- SQL Intent Generation: Improved code quality and fixed issues in SQL intent template generation scripts, including contact example.
+- SQLite: Removed old SQLite classified data example.
+- HTTPS: Documented new HTTPS config fields and startup validation behavior.
+
+
+## [2.6.6] - 2026-04-19
+
+### Core System Updates
+- Composite adapter: Enabled composite adapter end-to-end, reorganized prompt examples, and added composite cross-adapter template hot reload so the admin reload flow rebuilds cross-adapter template embeddings and vector collections (with tests for the reload and disabled/no-op paths)
+- Cross-adapter templates: Added cross-domain intent templates layered on top of individual adapters
+- OpenAI Realtime voice: Added `openai_realtime` adapter (`open-ai-real-time-voice-chat`) bridging ORBIT's `/ws/voice` JSON protocol to OpenAI's Realtime WebSocket; registered in the adapter registry; added `clients/openai-realtime-voice` (Vite) for manual testing; routed voice WebSocket adapter selection through API-key resolution; loaded Realtime session instructions from the prompt service instead of static config; tightened VAD defaults to reduce false turns; added prompt/voice-turn debug logging
+- Autocomplete service hardening: Sanitize and deduplicate `nl_examples`, clamp limits to config, single-flight cache population, prefilter fuzzy candidates by relevance instead of naive truncation; detached business-analytics adapter into its own file; added a NASA-principles-based coding agent
+- Admin auditing: New audit module for admin events
+- Default inference model: `openai` `gpt-5.4-mini`
+- Utilities: New MongoDB↔SQLite sync script for API keys and personas
+
+### Chat-app & UI Improvements
+- orbitchat mobile: Single-row input layout (only attach + send visible); hide voice toggle, mic, and help buttons on mobile; shorten "Continue Discussion" to "Continue"; keep action buttons on one row; reposition feedback toast above thumbs; fix placeholder overflow with truncation; remove persistent hover background on selected feedback thumbs
+- orbitchat autocomplete redesign: Move suggestions from a floating card above the input to full-width rows below; typed portion in muted gray, completion in bold; removed keyboard hint bar; mobile-friendly touch targets preserved
+- orbitchat file upload: Redesigned drop zone (icon badge, horizontal layout, subtle hover transitions); animated progress rows with slim progress bar and percentage readout; modernized success/error/warning banners using app color tokens; 120s backend processing timeout to prevent files stuck in `processing`; propagated `error_message` through `FileAttachment`, `getFileInfo`, `listFiles`, `pollFileStatus`; failed files show red error state in file pills instead of an infinite spinner; progress entries cleaned up on failed/completed; skip confirmation dialog when dismissing failed file pills
+- orbitchat SEO: YAML-driven SEO settings; generated `sitemap.xml` and `robots.txt` from config; per-agent metadata/canonical handling; render backend agent notes on agent landing pages for indexing
+- Admin panel — Adapter tab: Dedicated adapter management; removed adapter controls from Ops; searchable/paginated tables replacing long vertical scroll on overview
+- Admin panel — API keys / personas: List-level + Create actions hide the create forms; detail views stay read-only until explicit edit; persona edits apply without full reload; persona renames propagate to associated API-key metadata; markdown notes render in API key details; clipboard icon on API-key field; updated API-key/password mask toggle icon; refresh API-key adapter options after adapter creation; live character counters with notes/persona limits raised to 2000 characters (persona later raised to 10000); clearer stale-validation handling and password-rules guidance
+- Admin panel — general: New audit view; bulk delete across users / API keys / personas; pagination for long lists; user management polish
+
+### Bug Fixes & Technical Improvements
+- Adapter toggle now applies immediately: The admin toggle endpoint (`PATCH /admin/adapters/config/entry/{name}/toggle`) wrote `enabled: true/false` to YAML but never notified `DynamicAdapterManager`, so disabled adapters remained usable from the client until a manual "Reload Adapter" click; the handler now calls `reload_adapters_config(config_path)` and `adapter_manager.reload_adapters(new_config, adapter_name)` after the write, reusing the single-adapter reload path (evicts the cached instance and removes the entry from `AdapterConfigManager` on disable; preloads on enable); response includes `reload_summary` / `reload_error` so the UI surfaces runtime-sync failures instead of claiming silent success (Fix #127)
+- Provider error sanitization: Raw provider SDK exceptions (e.g. OpenAI `Error code: 401 - Your IP is not authorized...`) were being streamed back to clients as response chunks, leaking account-, network-, and policy-level detail; errors are now wrapped in a client-safe `ProviderServiceError`, streaming paths that previously yielded raw strings are sanitized, and provider base classes raise instead of yielding error chunks
+- Config hygiene: Removed unused `embedding_provider` field from datasource entries in `config/datasources.yaml` (chroma, qdrant, milvus, pinecone); deleted the orphan `resolve_datasource_embedding_provider()` in `server/config/resolver.py`; simplified `IntentSQLRetriever._initialize_embedding_client` to always resolve via the global `embedding.provider` (the datasource-level override was never reachable in production code paths)
+- Audit log decompression: Fixed SQLite and MongoDB audit read paths incorrectly attempting to decompress plain-text `query` values whenever `response_compressed` was set; only `response` is compressed by the serializer, so the old logic generated noisy `Incorrect padding` warnings and risked inconsistent query reads; added regression tests to lock the contract for both backends
+- Refactor: Moved `nh3` and markdown handling to the default profile
+
+## [2.6.5] - 2026-04-06
+
+### Core System Updates
+- PostgreSQL: Migrated from `psycopg2-binary` to `psycopg[binary,pool]` 3.3.3 across datasources, retrievers, vector stores, and examples (`ConnectionPool`, `dict_row`, `row_factory`); isolated the postgres sample adapter into its own module; fixed customer-order SQL templates and sql-intent parsing; added customer-orders sample data utilities
+- MCP: Replaced unmaintained `fastapi-mcp` with `fastmcp` (`FastMCP.from_fastapi()` + mount); `/mcp` path and Streamable HTTP transport unchanged
+- Intent debugging: `POST /admin/adapters/{adapter_name}/test-query` and `server/tools/test_template_query.py` to exercise intent templates (scores, reranking, parameter trace, rendered SQL, raw results); `--verbose` for vector health, template inventory, and domain config
+- Admin: Bearer-token helper script for multi-platform admin auth
+- Examples: Removed hosted API sample; expanded math persona example; sandbox sample use-case table and content refresh
+
+### Chat-app & UI Improvements
+- Config: Single-adapter (`agentMode`) — fixed adapter bypasses agent selection, slug routing, and “Change Agent”; empty-state title shows adapter name immediately (including after clearing conversations)
+- Sandbox docs: Sample links open in a new tab
+- Chat UX: Agent search and thread follow-up polish (Continue Discussion, filtered search centering and keyboard use, empty states and inputs)
+- Voice: Lower time-to-first-audio (sentence batch size 3→1); streaming TTS path for OpenAI, ElevenLabs, and vLLM (with tests and gpt-4o-mini-tts instructions handling)
+
+### Bug Fixes & Technical Improvements
+- Install & files: Dependency resolution and upgrades (e.g. environs/langchain, PyTorch/torchvision for Docling, Intel macOS torch constraints); file pipeline falls through to the next processor when Docling fails so MarkItDown/native can still handle uploads
+- Utilities: Template/query tooling — optional `template-id` to pick queries from a specific template entry
+
+### Documentation & Configuration
+- Docs and live-sample datasource column tweaks
+
+## [2.6.4] - 2026-03-26
+
+### Core System Updates
+- Admin: Adapters tab with searchable list, per-adapter Ace YAML editor, enable/disable toggles, and read/write/list endpoints aligned with reload-adapters and reload-templates
+- Chat feedback: Thumbs up/down wired to feedback API and database with idempotent create/remove/switch on main replies and thread replies; responses always return `assistant_message_id` for feedback
+- Config: `adapters[].inputPlaceholder` from `orbitchat.yaml` through runtime metadata to `MessageInput`, with precedence so multimodal/file-upload adapters can override the generic placeholder
+
+### Chat-app & UI Improvements
+- orbitchat v3.6.1: Input-first empty state (centered input, adapter display name, adapter notes in help modal); transparent mobile header; `getAdapterDisplayName()` helper; chat feedback buttons enabled
+- Admin login: Simplified copy and layout (centered sign-in; removed kicker and long feature blurb)
+- Minor UX: More space for agent notes
+
+### Bug Fixes & Technical Improvements
+- Vector store score consistency: Fixed similarity score formulas across all vector store backends so `confidence_threshold` behaves identically regardless of backend — ChromaDB used `1 - d/2` instead of `1 - d` (inflating scores ~15-25%), FAISS applied a cosine formula to L2 distances, and Milvus returned raw L2 distances as scores; all stores now return true cosine similarity in [0, 1]
+- Per-example template embedding: Replaced single-blob embedding strategy (all nl_examples concatenated into one vector per template) with per-example indexing — each `nl_example` gets its own vector with lightweight context (description + primary entity), widening the score spread from ~0.55-0.67 to ~0.20-0.95+, eliminating both false positives on short queries and missed exact matches at reasonable thresholds
+- Template search dedup: `_find_best_templates` now strips `::exN` vector ID suffixes and deduplicates by base template, keeping the highest-scoring example per template
+- Template rescue fix: `_rescue_by_nl_example` now always runs even when vector search returns zero results, preventing missed exact nl_example matches when threshold filters everything
+- Test coverage: Added 27 unit tests for score conversion formulas (Chroma, FAISS, Milvus, Weaviate cross-consistency), per-example embedding text generation, and deduplication logic
+- Language detection: Pipeline identification, multilingual intent domain parameters, and embedding client close behavior
+- Database cleanup script: Extended to additional tables
+- Composite retriever: The composite retriever silently dropped all template matches from child adapters using per-example indexing.
+- Fix English detection for ASCII search queries: add an English query heuristic for short ASCII noun-phrase searches.
+- Core consistency fix: ChromaDB, FAISS, and Milvus vector stores returned inflated or incorrect similarity scores, causing confidence_threshold to behave differently depending on the backend
+- Fix embedding client closed detection in composite retriever: apply the same fix from 2.6.3 so session-based providers (Voyage, OpenRouter) no longer trigger unnecessary reinitialization on every query
+
+## [2.6.3] - 2026-03-19
+
+### Core System Updates
+- Admin: Search filters for API keys and personas, persona creation in right panel, editable API key metadata, notes length 1000 characters
+- Vision: Added `ollama_cloud` vision provider (qwen3.5) with config, service, and registry integration
+- Retriever lifecycle: Fixed premature close of shared embedding services (avoids stale clients and unnecessary reinitialization)
+
+### Chat-app & UI Improvements
+- orbitchat v3.5.6: Sidebar UX (time-grouped conversations, markdown previews, keyboard navigation, ARIA, search feedback, auto-scroll, filtering); layout width 48rem→64rem; consolidated thread/actions row; scrollable table containers; minor theme/styling polish
+- Charts: Premium ChartRenderer (custom tooltips, click-to-toggle legend, SVG gradients, animations, donut pie, skeleton/error states, ARIA); cross-model rendering fixes (series `dataKey`→`key`, xKey reconciliation, multi-line JSON); Anthropic system messages via top-level `system`; model-agnostic chart instructions and test prompt updates
+
+### Bug Fixes & Technical Improvements
+- Embedding client: Fixed closed detection in SQL/HTTP intent retriever bases so session-based providers (Voyage, OpenRouter) no longer trigger unnecessary reinitialization; check session/session_manager before client
+- Intent SQL: Fixed year-like template parameter extraction (integer fallback) so explicit years bind correctly; regression test for domain extraction (e.g. Edmonton weekend vs weekday path)
+- Language detection: Fixed French queries being overridden to English by ASCII bias heuristic — expanded French phrase/word patterns, hardened German word patterns to avoid false positives on English text, widened `NON_ENGLISH_DIACRITICS_PATTERN`, required min 2 pattern matches for ambiguous languages (de/nl/no/da/fi/id), and guarded both ASCII bias paths against non-English Latin text
+- Language instruction builder: Fixed `min_confidence` default mismatch (0.8→0.7) with detection config; trusted ensemble/pattern detection methods at confidence ≥ 0.5; stopped overriding non-English `threshold_fallback` results to English
+- Language detection fallback: When ensemble votes favor a non-English language but confidence/margin is below threshold, fallback now returns the best-voted language instead of hardcoded English when Latin word patterns confirm non-English text
+- Intent template matching: Added nl_example rescue pass in `_find_best_templates` — scans all templates for close Jaccard matches missed by the top-k vector search, preventing wrong-template selection when embeddings are tightly clustered
+- Parameter extraction: Fixed multilingual year parameter extraction — `_extract_year_parameter` now recognizes year-related parameter names in 13 languages (fr, es, pt, de, it, nl, pl/cs, ru, sv/no/da, fi, tr, hu) so explicit years like "en 2023" bind correctly instead of falling back to the template default
+
+### API & Client Updates
+- orbitchat v3.5.6: Published NPM package
+
+### Documentation & Configuration
+- Removed outdated roadmap (items largely implemented)
+
+## [2.6.2] - 2026-03-17
+
+### Core System Updates
+- Admin: Added Settings tab with YAML config editor (view/edit config).yaml in browser via Ace Editor, GET/PUT /admin/config with validation.
+
+### Bug Fixes & Technical Improvements
+- Chat history service: Fixed warning text in history, metrics count query, bulk cleanup, cascade delete, tokenization/backfill/SQLite fixes, token budget for all providers, token usage API
+
+## [2.6.1] - 2026-03-15
+
+### Core System Updates
+- Admin & Operations: Added a server-rendered `/admin` panel for user management, API key CRUD with quota controls, prompt/persona management, and server operations; merged the monitoring dashboard into the admin Overview and moved related auth/export routes under `/admin/*`
+- Node API: Expanded `clients/node-api` to mirror ORBIT server endpoints, including auth, admin, quota, prompt, reload, shutdown, health, voice, dashboard helpers, WebSocket URL helpers, and `deleteAllFiles()`
+- Utilities: Restored DuckDB CSV utilities and added vLLM helper scripts
+- Agents: Added an implementation review agent
+
+### Chat-app & UI Improvements
+- orbitchat v3.5.4: Published new NPM releases including the admin/chat improvements from this cycle
+- Chat UX: Refined desktop chat layout, agent cards, agent search, empty-state presentation, streaming cursor behavior, and thread reply scrolling/height handling
+- Drafts & Attachments: Fixed file-backed draft conversations so file-only drafts stay visible/selectable, preserve agent state, avoid attachment bleed between chats, and keep send disabled until a message is entered
+- Identity & Conversations: Propagated stable user identity across Orbitchat requests and fixed thread clearing to remove child reply history as well as thread metadata
+- Admin UX: Improved admin panel record selection, confirmation flows, key/prompt association workflows, account management, and sanitized markdown preview for prompt editing
+
+### Bug Fixes & Technical Improvements
+- Client Reliability & Security: Fixed cross-conversation streaming/regenerate bugs, debounced local storage persistence, tightened upload validation and batch upload polling, fixed stale voice/autocomplete/input state bugs, and addressed XSS, command injection, and prototype-pollution issues in client/CLI code
+- Data Sources & Shutdown: Made datasource initialization async-safe, disabled unsafe SQLite pooling, avoided premature pooled connection reservation, and fixed restart/shutdown operation issues
+- SQL & Services: Fixed SQL template parameter mismatches and several inference/service bugs involving timing, memory leaks, and dead code cleanup
+- Admin Hardening: Moved API key management off raw key URLs to record IDs with compatibility fallback, added request timeouts/log polling guards, tightened CSP, bounded chat history access, and aligned configs/templates with the new admin structure
+
+### API & Client Updates
+- orbitchat v3.5.0-v3.5.4: Published updated packages during this release cycle
+
+### Documentation & Configuration
+- Cookbook: Added cookbook documentation, landing page, and an OpenClaw integration recipe
+- Config: Updated default settings, adapter model defaults, Docker instructions, and synced install/docker config templates to the latest structure
+
+## [2.6.0] - 2026-03-08
+
+### Core System Updates
+- Database & Scalability: Added database connection pooling, Redis resilience, and scalability fixes across PostgreSQL, MySQL, SQL Server, and Oracle; added DB scalability agent; fixed non-thread-safe SimpleConnectionPool, SQL injection in QA retriever ORDER BY, N+1 query pattern, and Redis permanent-disable-on-error behavior
+- Query Burst Cache: Added short-TTL (30s) query result caching at PipelineChatService level to absorb repeated identical requests (Redis primary with in-memory fallback); cache key from message, adapter, thread_id, file_ids, prompt_id
+- Server Shutdown: Fixed graceful shutdown hanging due to event loop deadlock; reordered shutdown (services first, thread pools last), thread pool shutdown in run_in_executor with timeout fallback
+- Startup & Config: Added startup script injection (startupScripts runtime config); configurable Express trust proxy via orbitchat.yaml for reverse-proxy/rate-limit deployments
+- CSV Pipeline: Added auto-split support for large CSVs in csv_to_duckdb pipeline (e.g. 450MB+), with --auto-split and --split-size CLI flags and per-chunk progress
+- Dependencies: Replaced deprecated google-generativeai (Gemini) library; updated dependency versions and Qdrant client
+- Retrievers: Fixed 18 bugs in server/retrievers including SQL injection via unvalidated collection_name, case-sensitive filter bypasses, redundant re-initialization, stale domain components, greedy JSON extraction, error message leakage, HTTP client resource leak, race condition in embedding client re-init, unbounded rerank cache growth, template/parameter handling, and unit test mocking
+- Pipeline: Fixed 11 pipeline bugs (context.message guards, pipeline metrics on early returns, step identification, refusal_message in response_validation, truncation_info, metadata=None in document_reranking, sync wrapper run_coroutine_threadsafe, Optional types, metrics export)
+- File Adapter: Fixed 20 failing file-adapter tests (metadata store idempotent delete/update, SQLite migration for embedding_provider/embedding_dimensions and file_id→id rename, MarkItDown text/csv and application/json, query endpoint adapter-specific config)
+- Other Fixes: Fixed JSON TOON conversion for object serialization; fixed unit tests across adapters, admin integration, and sound service
+
+### Chat-app & UI Improvements
+- orbitchat v3.4.0: NPM releases with merged markdown-renderer, improved markdown/mermaid rendering, and regression test prompts
+- Thread UX: Improved thread discoverability with inline "Follow up" button, placeholder "Start a new topic...", and dismissible banner; polish header links (new tab, rel noopener), accessibility (focus ring on logo), and logo size config docs
+- Desktop: Redesigned initial chat interface; centered conversation layout at max-w-4xl; iMessage-style right-aligned blue chat bubbles for user messages; configurable header logo dimensions and application.name as markdown with emoji support; application.favicon override with bundled fallback
+- Mobile: Fix viewport (h-dvh), TTS on mobile (AudioContext on user gesture, Opus MIME probing for iOS Safari), multi-tone sound effects; display cards in two columns; input autofocus, thread scrolling, Settings Dialog and reset flow; various mobile input and UX fixes
+- Tables & Scrolling: Fix content and table horizontal scrolling (including reply threads); remove static horizontal scroll bar in thread tables
+- Adapters: fix(adapters) enforce yaml+env pairing for visible/active agents (id vs name, VITE_ADAPTER_KEYS); v3.2.5 decouple display name from API key mapping (required id field)
+- Autocomplete: fix(chat) suppress autocomplete for unsupported adapters (capability flag or 404/405/501); only show suggestions panel when suggestions exist
+- Theme: Improve header/footer light theme (pure white default), header logo link to home, dark theme preserved; change default OpenAI voice to nova
+
+### Bug Fixes & Technical Improvements
+- CLI: fix(cli) reject unknown command-line options with error and help text
+- Config: Removed brandName header setting; logo-only branding; clarified logoHeight/logoWidth docs
+- Refactor: Major refactoring merging markdown components into orbitchat and removing markdown-renderer sub-project; removed directory/folder cleanups
+
+### API & Client Updates
+- orbitchat v3.4.0: Published NPM versions with UI, markdown, and config improvements
+
+### Documentation & Configuration
+- README: Revamp for pragmatic onboarding and MCP support (curl quick-start, stable release install, tutorials/technical articles/case studies); docs(readme) optimize for enterprise positioning (demo video, trust badges, 60s quickstart, Schmitech as official ORBIT enterprise provider)
+- Content: Update intro wording, demo video link, and minor wording/content updates; config changes for adapters and voice default
+
+## [2.5.0] - 2026-02-20
+
+### Core System Updates
+- PersonaPlex Adapter: Added NVIDIA PersonaPlex speech-to-speech adapter with full-duplex voice streaming, WebSocket proxy, Opus codec support, and interrupt (barge-in) support
+- Real-Time Voice: Added real-time-voice-chat support with prompt and API-key wiring and orbitchat adapter entry
+- Math Teacher Adapter: Added multimodal adapter for high-school quadratic functions tutoring
+- Athena SQL Intent Retriever: Added semantic SQL intent retriever for AWS Athena with documentation updates
+- Context LLM Efficiency: Optimized inference pipeline with structured context formatting, `<context>` tags, context_max_tokens trimming, TableRenderer (pipe, markdown_table, toon, csv), and capability-driven document_reranking
+- Cohere Inference: Switched to OpenAI-compatible API (api.cohere.ai/compatibility/v1) replacing native SDK
+- Transformers Local Inference: Added HuggingFace local inference provider via AutoModelForCausalLM with token-level streaming, CUDA/MPS/CPU detection, and device_map support
+- Firecrawl Scraper: Updated to support firecrawl-py v4.x SDK (scrape_url → v1.scrape_url, normalized params)
+- Audit Strategies: Fixed abstract close implementation for SQLite and MongoDB audit strategies; Fix #146 conversation thread compression in audit logs
+- Redis: Fixed stale Lua script references after reconnection in QuotaService and RateLimitMiddleware (re-register on client change)
+- Ruff Lint: Resolved ruff lint across server, bin, clients, examples, and utils (E722, F401, F841, E402, etc.)
+- OpenRouter Embedding: Fixed OpenRouter embedding service using AsyncOpenAI client and dimensions parameter
+- HuggingFace: Fixed HuggingFace inference service for unified framework and huggingface_hub 0.36.0; fixed deprecated torch_dtype parameter
+- clear_chat_history: Added -d/--db option and improved docstring for orbit.db path
+- PersonaPlex: Fixed SSL handling for wss://, timeout with large prompts (handshake_timeout), prompt_service integration; disabled unsupported interrupts for remote servers; removed knowledge injection capability
+
+### Chat-app & UI Improvements
+- React 19: Upgraded to React 19 with lucide-react compatibility, useRef types, and flexible peerDependencies (^18 || ^19); chat widget React/UMD compatibility fixes
+- Thread UX: Smooth thread UX with improved scrolling, tables, and composer design; fixed reply scroll jitter, markdown table layout, thread composer visuals and send button styling
+- Chat UX: Polished chat UX and decoupled voice I/O (VITE_ENABLE_AUDIO_OUTPUT vs VITE_ENABLE_AUDIO_INPUT); refined autocomplete suggestion menu, message avatars and bubble styling; configurable silence timeout and auto-send on silence
+- Autocomplete: Stabilized autocomplete (stale-response protection, focus trapping, keyboard UX, live-region announcements); fixed flickering and copy toast design
+- Accessibility: Enhanced accessibility and interaction UX (aria-labels, role="button" sidebar, role="alert" errors, prefers-reduced-motion); fixed nested button hydration in Sidebar
+- Thread Reply: Replaced follow-up CTA with inline Reply-in-thread action; help tooltip and placeholder "Ask another question..." for new topics
+- Dark/Light: Added dark/light theme toggle; externalized settings and about message
+- Message Layout: Fixed user avatar cut off at top; improved table horizontal scrolling and delete conversation styles/dialogs
+- orbitchat: Bundled local markdown-renderer (path aliases, lazy-load Mermaid/Chart/Music/SVG); removed enableApiMiddleware toggle (proxy-only architecture, removed @schmitech/chatbot-api); configurable header, footer, Auth0 integration, guest limitations
+- Mobile: New ORBIT Mobile project with thread UX parity, conversation list polish, dark/light toggling, table horizontal scroll, swipe-to-delete, adapter info hydration; enabled audio; improved delete dialogs and empty-state UX
+- Theming: Removed theming app (moved to own repo); disabled widget section
+
+### Bug Fixes & Technical Improvements
+- Streaming: Fixed cancel streaming signal handling when client sends cancel; fixed spaces and batching in streaming
+- PersonaPlex: Fixed timeout with large text prompts (handshake 60s, "initializing" status); fixed SSL context for wss://
+- API Refactor: Centralized client request/error handling and modernize test/integration tooling (API v2.2.0)
+
+### API & Client Updates
+- orbitchat v3.1.1 / v3.1.0: Published NPM versions with proxy-only architecture, local markdown-renderer, header/footer and Auth0 config, daemon start script (wrap sh in npm package)
+- orbitchat v2.14.1: Earlier release in cycle
+- Node API v2.2.0: Upgraded with centralized error handling and autocomplete/thread fixes
+- Chat Widget: React 19 UMD/theme alignment; web widget project removed
+
+### Documentation & Configuration
+- README and docs: Logo updates, curl example, support URL (orbitinfra), explore-the-sandbox simplification, chunking and retriever (Athena) documentation
+- PersonaPlex: README and adapter documentation; PersonaPlexKnowledgeService removed (static knowledge injection removed)
+- Docker/Setup: New daemon start script for Orbitchat; HF config updates (gemini vision, redis default off)
+- Examples: PersonaPlex grounded agent examples; classified data SQL example fix; removed demo project
+- AWS: Documented AWS GW Orbit Integration and Lambda authorizer
+
+## [2.4.0] - 2026-01-23
+
+### Core System Updates
+- Intent Agent Retriever: Added IntentAgentRetriever with function calling capabilities for complex task execution
+- FastAPI Optimizations: Implemented ORJSONResponse for improved API performance and serialization speed
+- GPU Auto-Detection: Added automatic GPU detection and included SmolLM2 model support
+- Audit & Logging: Separated audit and logging Elasticsearch indices for better data organization
+
+### Bug Fixes & Technical Improvements
+- Ollama Streaming: Fixed streaming timeout issues and added SmolLM2 GPU preset
+- Vector Store Fallback: Fixed vector store fallback logic when ChromaDB is disabled
+- Gemini Provider: Fixed streaming errors in Gemini integration
+- Torch XPU: Fixed compatibility issues with torch.xpu backend
+- Intent Agent: Fixed parameter extraction bugs and added tool validation logic
+- Test Suite: Fixed CLI integration and Redis integration tests
+
+### Documentation & Configuration
+- README Revamp: Redesigned README for better readability and scannable onboarding
+- Docker Profiles: Added minimal configuration profile for Docker deployments
+- Documentation Updates: Updated contact links, support information, and sandbox references
+- Docker Scripts: Updated and improved Docker deployment scripts
+
+## [2.3.0] - 2026-01-14
+
+### Core System Updates
+- Composite Intent Retriever: New CompositeIntentRetriever for multi-source query routing with parallel template search, shared embedding client, and best-match routing based on similarity scores
+- Multi-Stage Template Selection: Extended composite retriever with LLM reranking and string similarity stages for improved template matching accuracy
+- Template Hot-Reload: Added CLI command and API endpoint to reload intent templates without server restart (Issue #126)
+- OpenAI-Compatible Endpoint: Exposed /v1/chat/completions endpoint enabling official OpenAI SDK clients to work against ORBIT (Issue #57)
+- TensorRT-LLM Provider: Added NVIDIA TensorRT-LLM as new inference provider with dual-mode support (direct and API)
+- OpenRouter SDK: Added native OpenRouter SDK support for inference and embeddings, replacing OpenAI-compatible client
+- Autocomplete Suggestions: Implemented query autocomplete system extracting suggestions from intent template nl_examples with fuzzy matching
+- Rate Limiting: Added Redis-backed rate limiting middleware with IP spoofing protection, atomic Lua scripts, and configurable trusted proxies
+- Throttling Quotas: Added per-API-key quotas with progressive delays complementing existing rate limiting
+- Audit Trail Storage: Added multi-backend audit trail storage (SQLite, MongoDB, Elasticsearch) with optional gzip compression (Issue #130)
+- Clock Service Improvements: Added timezone validation, caching, per-adapter time_format override, and health check methods
+- Redis Cache Clearing: Added comprehensive cache clearing on startup to prevent orphaned data
+- Circuit Breaker Fix: Added thread safety and max size caps to prevent memory leaks
+
+### Chat-app & UI Improvements
+- Agent Selection Cards: Replaced dropdown-based agent selector with full-screen card list for better discoverability
+- Sidebar Controls: Moved adapter/config controls into sidebar keeping chat header focused on conversations
+- Stop Streaming: Implemented server-side stream cancellation with stop button in chat UI
+- Autocomplete UI: Added 300ms debounced autocomplete dropdown with keyboard navigation in message input
+- Thread Discoverability: Replaced minimal start-thread button with descriptive callout card and rotating example prompts
+- Application Name Config: Added configurable application name via VITE_APPLICATION_NAME for browser tab title
+- Agent Routing: Added shareable agent URLs with slug-based deep links
+- Welcome Heading: Added runtime welcome heading with mode-aware placement
+- GitHub Stats Badge: Added GitHub CTA in chat header
+- Improved Limits UX: Better handling for threads, messages, and uploads with in-context warnings
+- Mobile UX: Keep focus after autocomplete selection, centered message input caret with placeholder
+
+### Bug Fixes & Technical Improvements
+- Streaming Fixes: Fixed real-time streaming by skipping LLM step by name, added 50ms batching buffer, preserved spaces in content
+- Scrolling Fixes: Fixed scrolling during streaming and in thread conversations
+- Threading Fixes: Added supports_threading capability, fixed confidence checks for valid retrieval results, fixed button showing for "no results"
+- ChromaDB Cache: Fixed stale collection cache causing search failures with cache validation
+- Duplicate Initialization: Fixed duplicate service initialization in thread/database services
+- Redis Lua Scripts: Fixed register_script() usage for redis-py 7.x compatibility
+- Qdrant Fixes: Fixed clear_collection FilterSelector validation error, added Qdrant Cloud URL-based connection support
+- OpenRouter Fixes: Strip model artifacts from responses, add SQL file support
+- Ollama Cloud: Fixed response handling and increased context window to 32K
+- Embedding Validation: Fixed false-positive warnings for Ollama-based retrievers
+- Vector Dimension Mismatch: Optimized handling with pre-compiled regex patterns
+- Module Import Fix: Fixed ModuleNotFoundError when running bin/orbit.py directly
+- Python Client: Fixed streaming with httpx and direct stdout for real-time output
+
+### API & Client Updates
+- orbitchat v2.10.2: Published new NPM package versions (v2.4.0 through v2.10.2) with UI improvements and bug fixes
+- Node API v2.1.6: Updated with autocomplete support and various fixes
+- Python Client v1.1.6: New version with markdown rendering in responses and aligned slash completions
+- Chat Widget v0.6.1: New versions with conversation deletion, markdown alignment, and theme improvements
+
+### Security Improvements
+- API Path Security: Replaced /api/proxy/ paths with /api/ to hide proxy architecture
+- API Key Masking: Mask API keys in audit logs and chat history storage
+- Moderation Messages: Fixed client error handling to display moderation messages properly
+- LLM Guard Removal: Removed deprecated LLM Guard service, consolidated to Moderator-only content moderation
+
+### Documentation & Configuration
+- Test Organization: Reorganized 60+ test files into logical category folders (Issue #64)
+- Docker Improvements: Added orbitchat web app to basic Docker image, enabled API middleware mode
+- Setup Script: Added flexible multi-profile syntax, --torch-backend option, and uv support
+- Qdrant Scripts: Added cloud support and update mode for collection scripts
+- DuckDB Utils: Added CSV-to-DuckDB utilities and template testing scripts
+- TTS Sanitization: Added content sanitization to skip tables, charts, and code blocks before TTS generation
+
+## [2.2.0] - 2025-12-12
+
+### Core System Updates
+- vLLM Dual-Mode Support: Added direct mode to vLLM inference service allowing in-process model loading with GPU, similar to llama_cpp and bitnet providers
+- Audio Config Split: Split sound.yaml into separate tts.yaml and stt.yaml with independent provider configs, updated adapters to use stt_provider/tts_provider
+- Ollama Improvements: Added configurable adapter_preload_timeout (default 120s), improved warm-up with keep_alive and skip-if-loaded optimization, added ollama_remote for self-hosted servers
+- Language Detection: Skip Redis calls when stickiness is disabled, fixed confidence calculation and metadata exposure bugs
+- Jinja2 Templates: Converted intent templates to Jinja2 format with corresponding unit tests (Issue #69)
+- Qdrant Cloud: Added URL-based connection support with auto-index creation for payload fields
+- File Processing: Added MarkItDown as alternative processor, added full data mode for CSV/JSON with configurable thresholds for exact lookups
+- Adapter Config Fix: Fixed adapter config not updating after reload in chat service (Issue #92)
+- Maintenance Mode: Added runtime flag and UI for out-of-service messaging
+
+### Chat-app & UI Improvements
+- Mobile UI Enhancements: Added iOS/Android PWA meta tags, improved touch interactions, redesigned MessageInput with stacked layout, added larger touch targets (44px)
+- Dark Mode Fixes: Fixed desktop chat dark background inconsistencies, aligned chat layout with sidebar
+- Adapter Notes: Sync markdown styling with theme, fix notes not loading on startup in middleware proxy mode
+- Middleware Proxy: Auto-select first adapter on startup, replace adapters.yaml with environment variable configuration
+- Thread Improvements: Fixed markdown rendering in conversation threads
+
+### Bug Fixes & Technical Improvements
+- Middleware Proxy Security: Removed API keys and URLs from /api/adapters response, fixed undefined variable errors
+- Startup Fixes: Resolved startup errors, reduced duplicate logging, dynamically load providers from inference.yaml
+- CLI Fixes: Fixed arguments not overriding build-time env vars in orbitchat, fixed MaxListenersExceededWarning
+- Template Rendering: Fixed undefined variables in Jinja2 filters, fixed HTTP Retriever and GraphQL templates after migration
+- MongoDB: Fixed insertion error for documents containing ObjectApiResponse, deduplicate query results
+- File Cleanup: Fixed orphan files remaining after clearing conversations in middleware mode
+- Script Fixes: Fixed bash compatibility issues on Mac
+
+### API & Client Updates
+- orbitchat v2.3.9: Published new NPM package versions (v2.2.5 through v2.3.9) with UI improvements and bug fixes
+- API Middleware: Fixed integration for threads, files, and new conversations
+
+### Documentation & Configuration
+- AWS Deployment: Added ALB deployment guide with WAF configuration, Dockerfile and docker-compose for containerized deployment
+- Dependencies: Updated Ollama to 0.6.1, moved Ollama to default profile, updated tarball script with pre-configured db
+- Examples: Added Alberta Shelter Occupancy Adapter, replaced Contact with HR template examples
+- Installation: Reordered options with latest release as recommended method
+
+## [2.1.1] - 2025-11-27
+
+### Core System Updates
+- GraphQL Intent Adapter: Added new GraphQL intent adapter with examples
+- File Metadata Consolidation: Consolidated file metadata storage into main backend database, removed separate files.db, updated FileMetadataStore to use DatabaseService interface
+- Chat History Cleanup: Implemented automatic cleanup for chat history messages exceeding token budget (deletes old messages when session exceeds 120% of token budget)
+- Elasticsearch Log Templates: Enhanced log templates with 16 new query templates (endpoint analysis, user activity, request tracing, order/job events, service health), expanded domain vocabulary, and correlated request traces
+- Default Model Updates: Changed default model to granite4:1b for ollama and llama_cpp providers
+- Dependencies: Updated various packages to latest versions
+
+### Chat-app & UI Improvements
+- Thread Replies: Fixed thread replies display and focus management (show user questions, prevent main input from stealing focus, refocus thread input after sending)
+- UI Styling: Polished UI styling with expanded sidebar card spacing, aligned actions with titles, centered conversation header row
+- Thread Panel Theme: Unified thread panel theme to match main chat palette with scoped styling
+- Configure API Button: Fixed enter key not working issue, renamed button label to 'Update'
+
+### Bug Fixes & Technical Improvements
+- ThreadDatasetService: Implemented singleton pattern to prevent duplicate initialization and reduce resource usage
+- File Processing: Added fallback processors for PPTX/XLSX/VTT formats to eliminate docling dependency, fixed ChromaDB intermittent "Collection does not exist" race condition
+- Cohere Services: Fixed Cohere v2 API support with AsyncClientV2 initialization, added vision service support, maintained backward compatibility with v1 API
+- Voice Streaming: Fixed realtime voice streaming stability by wrapping raw PCM chunks in WAV containers before Whisper STT
+- Logging Refactoring: Standardized logging across codebase by replacing self.logger.* calls with module-level logger.* calls
+- Whisper Logger: Fixed logger definition moved from module docstring to module level
+- CLI Restart: Fixed restart command when server uses non-default port (removed hardcoded port 3000)
+- Elasticsearch Templates: Fixed JSON parsing error in search_slow_requests template by removing unsupported {% set %} statements
+- Qdrant Integration: Completed Qdrant integration with v1.16 API compatibility, fixed file deletion cleanup
+- File Attachments: Fixed retry action to send file attachments along with questions, fixed attachment IDs not being sent
+- Unit Tests: Fixed various unit test errors
+
+### API & Client Updates
+- orbitchat v2.1.7: Published new NPM package versions with UI improvements and bug fixes
+
+### Other Changes
+- Firecrawl Templates: Added helper scripts to generate firecrawl intent templates
+- GGUF Models: Updated gguf models config with granite4-1b
+- Logging Verbosity: Reduced info verbosity by setting config yaml loading to debug level
+- Documentation: Updated conversation_history.md with new architecture, updated SECURITY.md
+
+## [2.1.0] - 2025-11-22
+
+### Core System Updates
+- Conversation Threading: Implemented conversation threading support enabling follow-up questions on retrieved datasets without re-querying the database
+- Audio Services: Added global audio service gating with sound.enabled flag, new TTS providers (CoquiTTS, Gemini Audio Service, vLLM TTS)
+- Authentication: Authentication now enabled by default, removed auth.enabled setting
+- Adapter Refactoring: Split adapters.yaml into separate files, refactored DynamicAdapterManager (57% code reduction, 121 unit tests)
+- Configuration: Configured install/default-config as default, only enable simple-chat adapters by default
+
+### Chat-app & UI Improvements
+- Threaded Replies UI: Implemented Slack-style nested thread panels with inline composers
+- Mobile Layout: Added slide-in sidebar drawer and responsive mobile controls
+- Audio/Upload UI: Added enableAudioOutput flag with UI gating for mic/voice buttons and file upload controls
+- Sidebar & Input: Improved sidebar metadata, centered input field, moved voice toggle inline, updated MarkdownRenderer to v0.4.2
+
+### Bug Fixes & Technical Improvements
+- Thread Dataset Deletion: Fixed cascade deletion bug when Redis storage enabled
+- MongoDB Fixes: Resolved ObjectId JSON serialization errors and datetime deprecation warnings, fixed template rendering for arrays/dicts
+- Audio Providers: Fixed issues with Eleven Labs, Whisper adapter, and TTS voice handling
+- Security: Fixed critical CORS misconfiguration and implemented security headers middleware
+- SQL & Database: Fixed SQL template parametrization for DuckDB/Postgres, added missing token_count field to SQLite schema
+- HTTP Intent: Fixed URL parameter substitution causing 404 errors
+- Logging: Replaced verbose config checks with Python standard logging levels
+
+### API & Client Updates
+- Node API 2.1.0: Published new NPM package version
+- orbitchat v2.1.2: Published with UI improvements and bug fixes
+- MarkdownRenderer: Updated to v0.4.2
+
+### Audio & Voice Features
+- Sound Adapter: Added new TTS/STT capabilities with real-time audio streaming
+- Voice Recognition: Improved voice recognition with auto-send after silence, fixed voice input hijacking text input
+- Audio Optimization: Optimized audio processing for NVIDIA GPU/CUDA hardware
+
+### Conversation & Threading
+- Thread Implementation: Added Redis storage for thread datasets with cascade cleanup
+- History Optimization: Implemented intelligent fetch limits reducing database queries by 98%
+
+### CLI & Tools
+- CLI Redesign: Full refactoring of ORBIT admin CLI, renamed flags to --enable-upload / --enable-feedback
+
+### Other Changes
+- File Upload: Conversation uploads scoped per chat, titles capped at 100 characters, added paste screenshots support
+- Dashboard: Improved dashboard with basic authentication enabled
+- Documentation: Updated conversation history docs, added sample API keys script
+
+## [2.0.2] - 2025-11-11
+
+### Chat-app & Adapter API Updates
+- Adapter File Support Flag: Added flag to indicate whether an adapter supports file uploads, enabling/disabling upload functionality in chat-app accordingly
+- Adapter Info UI: Added new adapter info fields in chat-app UI showing support status and file capabilities
+- orbitchat 1.0.2: Published new version to npm with latest UI and adapter info features
+- Ollama Vision Service: Added new vision service for ollama vision models
+
+## [2.0.1] - 2025-11-10
+
+### Core System Updates
+- Sentence Transformers Embedding: Added new embedding service using the sentence transformer package with Hugging Face
+- Chunking Strategy Settings: Added new chunking strategy settings for files in config.yaml
+- Config Updates: Updated adapters.yaml to reflect new chunking settings for file-based adapters, changed default Anthropic model in inference.yaml
+- Remove Intent Caching Plan: Removed intent caching plan from codebase
+
+### Bug Fixes & Technical Improvements
+- Fix Anthropic Provider: Fixed Anthropic provider issue where top_p parameter is no longer accepted by API
+- Adapter Reloading Fixes: Applied multiple fixes to adapter hot reloading logic, fixed adapter disable issues when reloading
+- Load Adapter Config Settings: Fixed adapter config loading to use real adapter config settings instead of config files
+- Verbose Logging Improvements: Added more log output for tracing issues when verbose is enabled, applied verbose check on logging in file_routes.py
+- Recursive Chunker: Changed log line to debug level in recursive_chunker.py
+
+### Chat-app & UI Improvements
+- Chat-app Updates: Load adapter information for default-key, toggle GitHub visibility on/off based on env variable
+- Enable Chat-app Limits: Added limits for max files, conversations, and other settings
+- Message UI Improvements: Removed rectangle from message bubble for cleaner appearance
+- Adapter Info Refresh: Refresh adapter info section on top when adapter is reloaded on the backend
+- UI Refinements: Removed "Refresh" text from top, using refresh icon only for better UX
+- Chat-app Maintenance: Added tar exclusion in gitignore, renamed API testing instructions
+
+### API & Client Updates
+- New orbitchat NPM Package: Published new orbitchat NPM package (v1.0.0) for easy installation of ORBIT UI chat interface
+
+### Retrieval System
+- DuckDB Retriever Updates: Further improvements to DuckDB retriever and templates
+
+### Documentation & Examples
+- Documentation Updates: Updated and better organized documentation structure
+- README Improvements: Improved intro sections, replaced DB chat video example with one showcasing inline charts
+- Roadmap Updates: Updated roadmap and cleaned up documentation
+- NPM Installation Instructions: Added new orbitchat npm install instructions to README
+- Docker Configuration: Added config files to gitignore for Docker deployment
+
+## [2.0.0] - 2025-11-05
+
+### Core System Updates
+- SQLite Backend: Added support for SQLite backend in addition to MongoDB for easier setup and simplicity
+- Refactor Backend Services: Refactored core backend services to be more db-agnostic, fixed unit tests, added backend selection in config summary logger
+- Added DuckDB: New DuckDB store & datasource, updated roadmap documentation
+- Vision Services: New vision AI services in addition to embeddings, inference and rerankers, fix logging configurator, remove warning suppression
+- Remove inference_only mode: Removed the inference_only configuration option and all related code paths; system now exclusively uses adapters from adapters.yaml for routing
+- Update Inference.yaml: Update ollama_cloud settings for RAG purposes, enabled other providers previously marked as disabled
+- Config Updates: Update adapters and inference yaml config files to match latest features, optimized Ollama settings for large context
+- Update stores.yaml: Disable pinecone and qdrant by default
+- Adapter Capabilities System: Replaced hardcoded adapter type checks with declarative capability system using AdapterCapabilities with retrieval_behavior and formatting_style enums, integrated with adapter reload system, includes 25 unit tests and extensive documentation
+- Update Adapters Configuration: Updated adapters.yaml to reflect capabilities settings and default adapter names, added more DuckDB analytics templates
+
+### New Adapters & Features
+- New Files Adapter: Introduced new file adapter to perform AI reasoning tasks on files
+- New Multimodal Adapter: Added new multimodal adapter to chat with files in addition to regular inference
+- New DuckDB Adapter: Added new DuckDB retriever adapter for querying CSV/Parquet sources using SQL
+- New Adapter Info API: Added new endpoint to pull details about the agent associated with api key, including adapter name and AI model being used
+- File Adapter Integration: Implement file adapter integration with api.ts and chat-client for multimodal support, further updates to file adapter pipeline, more unit tests
+- File Retriever Updates: Further completion of new file retriever adapter, fix unit tests, update roadmap, added file conversation plan
+- Retrievers Adapter Updates: Further improvements of the new file retriever adapter, improve base retriever vector chunking handler for SQL and other intent-based retrievers
+- Firecrawler Chunking: Implemented vector chunking for HTTP firecrawler adapter when returning large content from web site
+
+### API & Client Updates
+- Node API 1.0.0: Update chat-app to use NPM Node API v 1.0.0, published new version to NPM
+- Python chat client: Fix formatting issues for numeric values, dates and emails, published v1.1.3, added adapter planning prompts for future use
+- Py Chat CLI 1.1.2: New Release of Python chat CLI to 1.1.2
+- Rename API Key: Added new api endpoint to rename api keys
+- Add API key validation: Add validateApiKey() method to ApiClient and integrate validation in chat-app when configuring API settings, replace console.error with console.warn for user-friendly messages
+- Add caching to prevent repeated initialization: Caches FileVectorRetriever instances to avoid redundant ChromaDB connections and embedding initialization on every request, includes comprehensive test coverage (19 new tests)
+
+### Chat-app & UI Improvements
+- Chat-app Updates: Multiple improvements to chat-app files upload functionality, associate conversations with their own api keys / session ids, further improvements
+- Chat Widget Theming Fixes: Renamed background to questionsBackground to match the parameter in chat widget
+- Clear All Conversations: Added clear all conversations button
+- Multimodal Adapter CleanUp: Clean up debug lines after multimodal adapter, only log when verbose / debug is enabled, added file vacuum script
+- MessageList Scrolling Fixes: Fixed scrolling down issues in MessageList component
+- MessageInput Improvements: Fixed scrolling down, improved input box, fixed unbounded text in input field plus other UX minor improvements
+
+### Bug Fixes & Technical Improvements
+- Fix streaming issues: Fix streaming issues, update logging verbosity from intent modules, update chat_client and test_mcp clients
+- Fix SQL and HTTP Intent Issues: Fix issues preventing SQL and HTTP based intent retrievers from being returned by the inference pipeline
+- OpenAI Streaming Issues: Address issues from OpenAI inference provider, added more unit tests, updated openai version
+- Fix text_vector_retriever_truncation: Fix unit test
+- Fix Unit Tests: Fix remaining of tests causing errors
+- Update intent_http_base.py: Added dump query results when verbose is true
+- Update llm_inference.py: Added chart instructions when asking to generate charts in the prompt, adjusted chart instructions prompt, removed unused build_chat_instruction_compact
+- Multimodal Adapter Loading Fix: Fixed issues with Multimodal Adapter not being loaded properly after introducing adapter reloading functionality
+
+### File & Retrieval System
+- Files Adapter Updates: Further refinement of new file adapter towards new release, more test coverage for file adapter, updated vector stores to better handle file chunking, enable sentence transformer library in minimal installation profile
+- File Adapter Updates: Further improve new file adapter, added more unit tests
+- Update with MarkdownRenderer 0.2.0: Import MarkdownRenderer 0.2.0
+- Update package.json: Update MarkdownRenderer to v0.3.3, updated packages, removed deprecation warnings, updated to latest version of MarkdownRenderer (no more nesting warnings)
+
+### Testing & Quality Assurance
+- Create Unit Test: New unit test for file adapter
+- Create File Unit Test: Add additional file adapter unit test
+- Ollama Embedding Test: Added new test for ollama embedding
+
+### Documentation & Examples
+- Create secure LLM RAG Diagram: New diagram describing on-prem LLM architecture
+- Update legal document example: Updated document
+- Remove adapter comparison: Removed unused document
+- Data Correlation Examples: Added sample files to test data correlation when analyzing multiple files
+- More Files Examples: Additional files examples to test multimodal capabilities
+- Roadmap Updates: Update roadmap plans, add reranking new design, add roadmap item (SQLite)
+- Update logs_templates.yaml: Refine DSL queries
+- Documentation Cleanup: Reorganized documentation structure
+- Documentation and Scripts Updates: Updated scripts and docs to reflect latest release v2.1.0
+
+## [1.6.0] - 2025-10-25
+
+### Core System Updates
+- Roadmap Updates
+- New MongoDB Intent Adapter
+- New Firecrawl Adapter
+- HTTP and ES Intent Updates
+
+## [1.5.9] - 2025-10-24
+
+### Core System Updates
+- Added HTTP REST adapter.
+- Added http and elasticsearch intent adapter types; addressed warning suppression issues.
+- Fixed issues with Cohere inference provider.
+- Errors handled gracefully when an inference provider is disabled, ensuring adapters continue to load normally.
+- Added enable setting in inference.yaml for selective provider loading; granite4:micro set as GGUF default.
+- Integrated new zAI inference service
+- More Vector Stores: Added support for faiss, marqo, milvus, pgvector, and weaviate vector stores.
+
+### Other Changes
+- Update classified demo template: Added another demonstration template.
+- Suppress Warnings: Suppressed server log runtime warnings; minor provider fix.
+- Update Setup Profiles: Moved dependencies from 'commercial' to 'minimal' profile and renamed 'commercial' to 'cloud'.
+- Setup Script, Embedding Plans: Improved setup script to prompt for python version; added embedding plan (sentence transformers); updated minimal profile.
+
+## [1.5.8] - 2025-10-17
+
+### Core System Updates
+- Update Contact Templates: Regenerate SQL intent templates for contact example.
+- Update template_reranker.py: Fix minor issue causing some templates to throw errors.
+- Add Bitnet AI Provider: Integrate Bitnet provider; fixed SQL template strategy and reranker issues.
+- SQL Templates Fixes: Improve SQL intent templates generation logic.
+- Ollama Cloud Fixes: Resolve issues with Ollama cloud and SQL template generation scripts.
+- Create Intent Result Caching Strategy: Implement caching for follow-up questions in intent retrievers.
+- Issue #48: Enable datasource overriding in adapters.yaml for SQL adapters.
+- SQLite db parameter: Replace db_path with database in datasource.yaml for better configuration clarity.
+- Update adapters.yaml: Reinstate postgres intent template example.
+- Update inference.yaml: Remove anyscale; set Ollama default model to granite4:micro.
+- Update datasources.yaml: Complete supplemental datasource settings.
+
+## [1.5.7] - 2025-10-15
+
+### Core System Updates
+- Fixed Issue #58: Transfer safety into its own yaml file, remove from main config.yaml.
+- Fixed #53 - Dashboard: Issue resolved for DASHBOARD; linked issue and improved stability.
+- Update dashboard_routes.py: Added datasource pooling panel to the dashboard for enhanced observability.
+- Datasource Connection Pooling: Enabled connection pooling for datasources.
+- New Datasource Registry: Introduced new datasource registry system for improved adapter compatibility and loading behavior.
+
+### Other Changes
+- Refined dashboard features for improved user experience.
+- General refactoring and bug fixes for performance and stability.
+
+## [1.5.6] - 2025-10-14
+
+### Core System Updates
+- AI Provider Services Consolidation: Massive refactoring of AI providers, removing unused providers and consolidating services
+- Embedding Services Migration: Migrated embedding providers to new AI services architecture
+- Moderators Migration: Brought moderators into new AI service architecture
+- Adapters Refactoring: Improved adapter architecture for better maintenance and adaptability
+
+### Bug Fixes & Technical Improvements
+- Embedding Service Issues: Fixed double initialization of embedding services by dynamic adapter
+- Inference Registry Fixes: Fixed double initialization of inference registry items
+- Template Fixes: Fixed 'detect_anomalous_access_patterns' template and added detect_compartment_hopping
+
+## [1.5.5] - 2025-10-10
+
+### Core System Updates
+- Adapters Refactoring: Improved adapter architecture for better maintenance and adaptability
+
+## [1.5.4] - 2025-10-10
+
+### Core System Updates
+- Pinecone QA Adapter: Added new Pinecone QA Retriever Adapter for enhanced vector database support
+- Vector Store Overriding: Enabled vector store overriding in intent adapters to choose between Chroma, Pinecone, Qdrant, Milvus, etc.
+- SQL Intent Template Generator: Enhanced SQL intent template generator with improved functionality and documentation
+
+### Python Client
+- Python CLI v1.1.1: Published new python package version to PyPI
+- Chat Client Fixes: Fixed markdown formatting issues in chat client
+
+### UI & Demo Applications
+- Theme Tab Updates: Added missing message background color picker to theming interface
+- Dashboard Improvements: Enhanced dashboard UX with better line hovering and value display
+- Chat App Enhancements: Added toggle for thumbs up/down buttons based on environment variable and increased logo size
+
+### Documentation & Configuration
+- README Updates: Multiple documentation improvements including video updates, contact examples, and scenario details
+- Classified Example Updates: Updated templates and SQL Intent documentation
+- Scraping Tools: Added scraping tools back for knowledge base extraction
+- Configuration Cleanup: Removed sample adapters from default adapter.yaml configuration
+
+## [1.5.3] - 2025-10-03
+
+### Core System Updates
+- Pinecone QA Adapter: Added new Pinecone QA Retriever Adapter for enhanced vector database support
+- Configuration Updates: Load MongoDB database name from environment variables instead of hardcoded values
+
+### Chat Widget & UI Improvements
+- Chat Widget v0.5.3: Published new NPM version with markdown renderer integration
+- Markdown Rendering: Fixed markdown styles and updated markdown-renderer package to v0.1.6
+- UX Enhancements: Multiple improvements to chat-app user experience including:
+  - Improved transition between message and input field
+  - Removed vertical border for cleaner interface
+  - Enhanced overall look and feel
+  - Final round of UX enhancements for better user interaction
+
+### SQL Intent & Retrieval System
+- SQLite Intent Examples: Added new SQL intent templates for domain classified information
+- Classified Data Example: Updated classified data example schema for better organization
+
+### Deployment & Infrastructure
+- Podman Support: Added new Podman project for alternative containerization deployment
+- Roadmap Updates: Added future adapter-related features and improvements to development roadmap
+
+## [1.5.2] - 2025-09-26
+
+### Core System Updates
+- Clear History Route: Added new endpoint to clear conversation history
+- Dependencies Update: Updated orbit CLI chat package version
+
+### Python Client
+- Python Client v1.1.0: Integration with new clear conversation endpoint from ORBIT server
+
+### Node API & Testing
+- Node API Updates: Enable delete chat history functionality in Node API
+- Node API Unit Tests: Added more comprehensive test coverage for the node API
+- Node API Tests: Fixed issues with node API unit tests
+- Package Updates: Updated package.json and published node-api NPM version 0.5.3
+- Chat App Fixes: Fixed issues with chat-app integration
+
+## [1.5.1] - 2025-09-25
+
+### Core System Updates
+- Ollama Refactoring: Simplified Ollama implementation and fixed issues with model overriding from adapters
+- Inference Providers Update: Better handling of prompt and message chaining in LLM providers
+- Elasticsearch Logging Fix: Fixed Elasticsearch logging issues and problems with chat_history and adapters incorrectly storing conversation
+
+## [1.5.0] - 2025-09-24
+
+### Core System Updates
+- New Passthrough LLM Adapter: Added new adapter for pure conversation (passthrough) with models without context retrieval, similar to inference_only mode
+- System Prompt Caching: Added system prompt caching using Redis service for improved performance
+- Ollama Provider Enhancements: Added more settings to both ollama and ollama_cloud providers and updated ollama package
+- Language Detection Improvements: Minor tweaks to language detection for French text and added Ollama Linux installation guide
+- LLM System Instructions: Adjusted LLM system instructions to provide more accurate information
+
+### SQL Intent & Retrieval System
+- Adapter Embeddings Override: Enabled ability to override global embedding for each adapter
+- SQL Intent Templates: Fixed issues with SQL templates and marked problematic templates for later review
+- Intent Adapter Simplification: Further simplified SQL intent adapter by removing prompt generation and delegating to LLM pipeline
+
+### Chatbot Widget & UI Improvements
+- Theming App Enhancements: Added API key toggle hide button and improved preview thumbnails
+- Widget React Example: Updated chat widget version
+- Markdown Table Fixes: Fixed markdown column table misalignment issues
+
+### Testing & Quality Assurance
+- Unit Test Fixes: Fixed issues with test_redis_service.py and test_pipeline_server_integration.py
+- Additional Test Coverage: Added test coverage for new passthrough LLM adapter
+
+## [1.4.3] - 2025-09-04
+
+### Core System Updates
+- Improved Chroma and Qdrant vector retrievers with enhanced results confidence scoring logic
+- Enhanced language detection steps for better accuracy
+
+### Chatbot Theming Platform
+- Fixed bugs preventing updates of API keys
+- Added ability to toggle endpoint field on/off and updated deploy script
+- Limited number of characters for API key and endpoint fields
+
+### Documentation & Configuration
+- Updated scripts for Chroma and Qdrant vector databases
+- Removed outdated MCP details as they are no longer used
+
+## [1.4.2] - 2025-09-01
+
+### SQL Intent & Retrieval System
+- Adapter issues: Fix issues with adapter config loading
+
+## [1.4.1] - 2025-09-01
+
+### SQL Intent & Retrieval System
+- Intent Adapter Redesign: Introduced better design for SQL intent adapter with new configurable vector stores service
+- SQL Adapter Fixes: Fixed config loading issues with SQL adapters and updated package version for commercial profile
+
+### Python Chat Client
+- Minor improvements: Updated chat-client (assistant text color and removal of warning about api-keys). Published new version 1.0.1.
+
+### Testing & Quality Assurance
+- Unit Test Fixes: Fixed intent retriever unit tests and removed unneeded tests
+
+### Documentation & Configuration
+- Updated ORBIT logo across the project
+
+## [1.4.0] - 2025-08-31
+
+### Core System Updates
+- FastAPI MCP: Replaced existing MCP implementation with FastAPI MCP library for cleaner and more maintainable code
+- Monitoring Dashboard: Added new monitoring dashboard for real-time resource monitoring
+
+### Chatbot Widget
+- Chat Widget v0.4.18: New NPM version with improved UX and bug fixes
+- Chat Widget Fixes: Fixed issue when switching windows on desktop and replaced thinking animation with moving 3 dots
+
+### Python Client
+- Python Client v1.0.0: Introduced interactive session commands with better user experience
+ 
+## [1.3.7] - 2025-08-29
+
+### Monitoring
+- Added prometheus dashboard for real-time resource monitoring
+
+## [1.3.6] - 2025-08-26
+
+### Retrievers
+- Remove ununsed file adapter, clean up code.
+
+### Examples
+- Improve postgres cusotmer orders data generator (SQL intent adapter).
+- Fix markdown issues in chat-app.
+
+## [1.3.5] - 2025-08-20
+
+### Core System Updates
+- Clock Service: Introduced clock service for context-aware date/time based on specified timezone
+- Ollama Provider: Fixed issues with Ollama cold starts and reduced code redundancy for Ollama services
+- Ollama Embeddings: Fixed issues with Ollama embeddings dimensions settings and Qdrant intent adapter
+
+### Chatbot Widget
+- Chat Widget v0.4.15: Significant updates to theming app and general UX improvements
+- Chat Widget v0.4.14: New NPM version with icon list updates and theming app improvements
+- Widget Updates: Further improvements to chatbot widget behavior and theming app
+- Theming App Fixes: Enhanced theming application with improved color presets and thumbnails
+
+### Vector Retrieval & RAG
+- Qdrant Retriever: Fixed repetitive initialization calls by moving connection check to singleton instance
+- Pinecone Integration: Added Pinecone scripts similar to Chroma and Qdrant for better vector database support
+
+### Documentation & Configuration
+- README Updates: Multiple updates including stargazer snippet, SQL intent adapter examples, and video content
+- Theme Presets: Updated color themes presets for better customization options
+- Configuration Updates: Added clock_service to config.yaml and updated inference.yaml with llama_cpp parameters
+
+### Testing & Quality Assurance
+- Test Updates: Fixed errors in test_mcp_client.py and improved test coverage
+- MCP Client: Updated test_mcp_client.py for better reliability
+
+### Development & Dependencies
+- Gemma Model: Added Gemma3 270m as default for basic installation
+- Examples: Updated NPM widget version in react-example and improved Qdrant collection creation scripts
+
+## [1.3.4] - 2025-08-15
+
+### Core System Updates
+- LLM-Guard Service: Resolve issues with llm guard service causing the server to stop responding, included more settings to improve resiliency
+
+### UI & Demo Applications
+- Theming App Improvements: Improve the default themes for the widget theming app
+
+### Testing & Quality Assurance
+- Performance Testing: Added perf tests using locust library
+
+### Development & Dependencies
+- Updated dev dependencies in toml file
+
+## [1.3.3] - 2025-08-14
+
+### Testing & Quality Assurance
+- Update Test Cleanup Scripts - Improve test clean up scripts to further remove any leftover after running the unit tests
+
+### Core System Updates
+- Language Detection Fixes - Resolve issues related to incorrect language detection
+
+### UI & Demo Applications
+- Theming App Update - Add new env variable to toggle display unavailable message during maintenance
+
+## [1.3.2] - 2025-08-12
+
+### Widget Theming App
+- Fixed API key update propagation issues
+- Enhanced responsive design across different devices
+- Improved numeric field validation
+- Fixed API settings update issues
+
+### Inference Pipeline & Adapters
+- Added integration with additional inference services
+- Implemented adapter-level inference provider overriding
+- Fixed inference provider overriding issues by adapters
+
+## [1.3.1] - 2025-08-10
+
+### Core System Updates
+- Updated Elasticsearch to 9.1.0
+- Fixed Elasticsearch Logger incompatibility with new inference pipeline
+- Fixed hardcoded port 3000 issues in unit tests and CLI login command
+- Updated build-tarball.sh script to fix Mac-specific tar generation issues
+- Updated README.md with logo improvements and size adjustments
+
+## [1.3.0] - 2025-08-09
+
+### Chatbot Widget
+- Chatbot Widget v0.4.13 with bug fixes and UX enhancements
+- Fixed issues in theming application and improved form input handling
+- Enhanced markdown rendering with improved currency values display
+- Fixed scrolling issues during response rendering and improved LaTeX rendering
+- Increased typing effect speed for better user experience
+- Updated widget version in react-example and theme app
+- Widget Theming App: Enhanced question form handling with proper truncation
+
+### SQL Intent & Retrieval System
+- Significant refactoring of SQL Intent Adapter for improved abstraction and reusability
+- Enhanced SQL retriever classes with better inheritance patterns
+- Added comprehensive SQL templates for insights and analytics
+- Improved intent SQL generation utilities and documentation
+- Reorganized SQL intent YAML templates for better maintainability
+- Enhanced unit tests for SQL intent functionality
+
+### Documentation & Configuration
+- Updated adapter configuration with enabled/disabled toggle settings
+- Enhanced documentation for SQL intent features and examples
+- Updated roadmap with current development plans
+- Improved README.md with better organization and maintainer links
+- Added Qdrant deployment instructions
+
+### Core System Updates
+- Updated Ollama provider to new version with chat endpoint interface
+- Enhanced test utilities for better markdown response formatting
+- Improved adapter settings management with configuration controls
+- Fixed duplicate logging issues in inference steps
+
+## [1.2.2] - 2025-07-30
+
+### Inference Pipeline & Architecture
+- Implemented new inference pipeline architecture
+- Added language detection step to the inference pipeline
+- Added lazy loading for inference providers to improve performance
+- Enhanced provider factory with improved unit tests and import path fixes
+
+### Docker & Deployment
+- Improved docker-cleanup.sh script
+- Updated tarball script
+- Removed unused config.yaml settings
+
+### Testing & Quality Assurance
+- Added aditional vLLM unit tests
+- Fixed minor import path issues in provider_factory.py
+- Enhanced test coverage for inference providers
+
+### UI & Demo Applications
+- Updated widget react example with minor improvements
+- Improved video content and demonstration materials
+
+## [1.2.1] - 2025-07-23
+
+### Fault Tolerance & Architecture
+- Implemented new circuit breaker pattern and fault tolerance mechanisms
+- Added new fault tolerance service with comprehensive error handling
+- Improved fault tolerance architecture with additional test coverage
+- Added adapters health endpoints for better monitoring
+- Enhanced abstraction and reusability with additional generic classes
+- Refactored and cleaned up redundant code for better maintainability
+
+### API & Authentication
+- New API Key Adapter Association feature - associate adapters with API keys
+- API keys now point to specific retriever behavior instead of single collection
+- Removed collection_name field references throughout the codebase
+- Updated adapter configuration to use adapter-specific settings
+
+### Vector Retrievers & RAG
+- Refactored Chroma and QDrant QA retrievers with base class extraction
+- Improved Intent RAG PoC with enhanced SQL template configuration
+- Added Streamlit UI app for Intent RAG demonstration
+- Enhanced PostgreSQL semantic RAG system with improved examples
+- Updated RAG examples and removed sentence transformers dependencies
+
+### Inference & Moderation
+- Fixed issues with vLLM inference client and improved unit tests
+- Added comprehensive test coverage for vLLM functionality
+- Fixed moderator service issues and improved unit tests
+- Updated default moderator configuration to use Ollama
+- Removed unused unit tests for cleaner codebase
+
+### UI & Demo Applications
+- Enhanced Streamlit PoC with UX improvements
+- Added additional script for Chroma example demonstration
+- Expanded QA sets for city-qa-pairs.json with more comprehensive data
+- Updated orbit architecture diagram to reflect current system design
+
+### Docker & Deployment
+- Updated docker scripts for improved deployment process
+- Enhanced setup.sh with model location updates and GGUF download script
+- Moved scripts to install directory and removed utils folder
+- Improved deployment configuration and script organization
+
+### Documentation & Configuration
+- Updated configuration files with improved settings
+- Enhanced documentation for fault tolerance features
+- Updated architecture diagrams to reflect current system design
+- Improved configuration management and deployment documentation
+
+## [1.2.0] - 2025-07-07
+
+### Authentication & Security
+- Introduced new authentication service with CLI integration
+- Improved CLI tools for better user experience with authentication operations
+- Added config-based authentication enable/disable controls
+
+### Chatbot Widget & UI Improvements
+- Chat Widget v0.4.11 with bug fixes and UX enhancements
+- Fixed suspended state issues after initial messages
+- Improved input field styling and border handling
+- Enhanced Widget Theming App with code highlighting and download functionality
+- Updated Node API client to version 0.5.1 with optimizations
+- Improved demo chat app UX and removed unused dependencies
+
+### Docker & Deployment
+- Enhanced docker deployment scripts and setup procedures
+- Added MongoDB initialization logic improvements
+- Fixed docker deployment issues with clean and test scripts
+- Improved tarball creation script with better sample data
+
+### Code Quality & Architecture
+- Removed language detection module due to complexity and ineffectiveness
+- Improved CLI code structure with direct command-to-handler mapping
+- Enhanced logging summary for better server startup feedback
+- Updated MongoDB service and reranker initialization logic
+
+### Documentation & Configuration
+- Updated README with improved diagrams and content
+- Enhanced widget documentation and usage instructions
+- Added theming app demonstration to documentation
+- Improved setup and configuration scripts
+
+## [1.1.4] - 2025-06-27
+
+### Docker & Deployment Scripts
+- Improve docker and setup scripts
+- Fix profile 'torch' and docker deployment issues
+- Added missing google-cloud dependency for profile 'commercial' in toml file
+
+### Security & Moderation
+- Fixed issue related to moderation called after LLM response instead of checking first before returning final response to client
+- Integrate new llm_guard service with existing moderators. Now it's possible to use both services to enforce safety.
+- Make safety check bidirectional (user prompt and LLM response)
+
+### Vector Database & Retrieval
+- Added Qdrant vector retriever (similar to Chroma)
+
+### Code Quality & Architecture
+- Chat Service Module: Significant improvement in code quality, maintainability and testability
+
+### Inference Providers
+- Added cohere and IBM Watson AI inference client
+
+### UI/Widget Improvements
+- Added new Widget Theming App
+- Chat Widget v0.4.9 new version of Widget with further UX enhancements and design updates
+
+## [1.1.3] - 2025-06-12
+
+### Language Support
+
+- Improve language detection module for more accurate language detection.
+- Updated language detection unit test for better coverage.
+- Improve language detection flow in chat_service.
+
+### vLLM
+
+- Fixed problem with vLLM inference. Updated vllm settings in config.
+
+### UI/Widget Improvements
+
+## [1.1.2] - 2025-06-09
+
+### UI/Widget Improvements
+- Significant UI/UX enhancements to the widget (v0.5.0)
+- Updated chat examples to use latest release chat widget 0.4.0
+- Removed widget project as it's been moved into its own repo
+- Updated ORBIT logo
+- Updated links in README.md to point to new chatbot widget project
+- Updated orbit diagram and orbit chat GUI example
+
+### Architecture & Code Structure
+- Refactored SQL and vector retrievers modules to promote inheritance
+- Added new settings based on recent additions of vector retrievers
+- Added new endpoints for file upload with corresponding retrieval adapter (early stage)
+- Use parameter num_ctx from inference provider for conversation history management
+- Replace HF with Torch libraries for GPU/CUDA backend support
+
+### Documentation & Content
+- Added logo, roadmap section, plus other content improvements
+- Fix navigation links
+- Added links to MD files under docs
+- Updated documentation to reflect recent changes
+- Updated readme, added new diagram
+- Added more items under roadmap
+- Added more items under why orbit
+- Added additional llama.cpp usage guide
+
+### Bug Fixes & Technical Improvements
+- Fix issues with API streaming logic
+- Improved language detection module
+- Fixed streaming issues in api.ts
+- Further improved language detection and unit tests
+- Updated API version to fix streaming issues
+- Improved language_detector.py and unit tests
+- Load conversation history warning from config.yaml
+
+### Testing
+- Added corresponding unit tests for new file upload endpoints
+- Added unit tests for conversation history management
+- Added unit tests for language detection improvements
+
+## [1.1.1] - 2025-05-30
+
+### Server Architecture & Refactoring
+- Further reduce size of inference server
+- Move logging-related code from inference server into logging_configuration.py
+- Extract middleware initialization code into middleware_configurator.py
+- Extract service factory function into service_factory module
+- Add routes_configurator.py module
+- Extract datasource initialization into datasource_factory.py
+- Consolidate code between inference server and main modules
+- Move HTTP session tracking function to HTTP utils
+
+### Testing & Quality Assurance
+- Fix issues with unit tests
+- Improve test coverage
+- Add TOML project under tests
+- Fix issues with test_prompt_guardrails.py
+- Remove warnings from unit tests
+- Fix run_tests.py for proper test execution
+- Remove test_retriever_types.py for rework
+
+### SQL Retrievers
+- Update SQL adapter architecture for better inheritance
+- Add basic Postgres and MySQL implementations
+- Further updates to SQL retriever design pattern
+
+### Chatbot Widget
+- Break chatbot widget into smaller components
+- Remove simple GUI example
+- Remove misplaced CharWidget.tsx file under widget directory
+
+### Documentation
+- Update README file
+- Add SQL retriever technical details under docs
+- Add more diagrams
+- Improve instructions on README.md
+- Add excalidraw diagram sources
+- Improve script and add better usage documentation
+- Update sql-retriever-architecture.md
+
+### Reranking
+- Re-organize rerankers, leaving ollama only while implementing the rest
+- Add unit tests
+- Update config file
+
+### Other Changes
+- Move HF GGUF download script to ./utils/scripts
+- Udpate release tarball creation script
+- Fixed minor config_manager.py warning
+
+## [1.1.0] - 2025-05-26
+
+### Config
+
+- Updated default settings in config example. Now uses llama_cpp by default instead of Ollama.
+- Disabled redis cache
+- Update default model name for llama_cpp inference
+
+### Core Services
+- Introduced conversation history only for inference service (RAG mode not yet supported).
+- Migrated admin endpoints from inference_server.py into its own route module as part to promote maintainability.
+- Fixed Redis cache service, added redis and mongdb services unit tests.
+- Fixed issues with config files. Disable loading RAG adapters if inference_only is true.
+- Fixed language and ollama unit tests. Fixed redis config issues.
+
+### Documentation & Configuration
+- Updated documentation, improved code for the adapters, removed redundancy.
+- Fixed issues with Elasticsearch logger.
+- Added more config settings and env variables.
+- Modified build-tarball to accept version as argument.
+
+### Chat Widget Improvements
+- Chatbot Widget v0.3.6. Made changes to chatbot widget to better handle session management so it works well with chat history on the backend. Updated client examples.
+- Chat Widget v0.3.7. Fixed issues with input box focus ring. Now it matches global theme. Changed theme for activities example.
+
+## [1.0.1] - 2025-05-23
+
+### Documentation
+- Minor updates to doc files to align with recent changes
+- Update architecture diagram
+
+### Core Services
+
+- Fixed issues related to missing error when context is not available in the inference clients
+
+### Chat Widget Improvements
+- Improved chatbot widget
+- Update Chat Widget Version to v0.3.5
+- Updated build script for widget project
+
+### Utilities
+- New utils/scripts folder with new git utility to extract commit history and populate CHANGELOG. 
+
+## [1.0.0] - 2025-05-19
+
+### Core Features
+- Initial release of ORBIT with full server and CLI functionality
+- ORBIT CLI tool for server management
+- API key management for service control
+
+### LLM Integration
+- Support for multiple LLM providers:
+  - Ollama (preferred)
+  - llama.cpp
+  - vllm
+  - Mistral
+  - OpenAI
+  - Anthropic
+  - Gemini
+
+### Data & Storage
+- RAG capabilities with SQLite & Chroma integration
+- Sample database setup scripts for quick start
+
+### Deployment
+- Docker deployment support
+
+## Guidelines
+
+All notable changes to the ORBIT project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.1.0.html).

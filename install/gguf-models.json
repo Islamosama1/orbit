@@ -1,0 +1,20 @@
+{
+  "models": {
+    "gemma4-2eb": {
+      "repo_id": "unsloth/gemma-4-E2B-it-GGUF",
+      "filename": "gemma-4-E2B-it-Q4_K_M.gguf"
+    },
+    "mistral-7b": {
+      "repo_id": "TheBloke/Mistral-7B-Instruct-v0.1-GGUF",
+      "filename": "mistral-7b-instruct-v0.1.Q4_0.gguf"
+    },
+    "granite4-1b": {
+      "repo_id": "ibm-granite/granite-4.0-1b-GGUF",
+      "filename": "granite-4.0-1b-Q4_K_M.gguf"
+    },
+    "embeddinggemma-300m": {
+      "repo_id": "unsloth/embeddinggemma-300m-GGUF",
+      "filename": "embeddinggemma-300m-Q4_0.gguf"
+    }
+  }
+} 

@@ -1,0 +1,208 @@
+"""
+Base classes for the pipeline architecture.
+
+This module defines the core interfaces and data structures used throughout
+the pipeline-based inference system.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Dict, List, Any, Optional, AsyncGenerator, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .service_container import ServiceContainer
+from dataclasses import dataclass, field
+import asyncio
+import logging
+
+@dataclass
+class ProcessingContext:
+    """
+    Shared context passed through pipeline steps.
+    
+    This context carries all the data needed for processing a request
+    through the pipeline, including input, intermediate results, and output.
+    """
+    # Input data
+    message: str = ""
+    adapter_name: str = ""
+    system_prompt_id: Optional[str] = None
+    inference_provider: Optional[str] = None
+    context_messages: List[Dict[str, str]] = field(default_factory=list)
+    
+    # Processing data
+    retrieved_docs: List[Dict[str, Any]] = field(default_factory=list)
+    formatted_context: str = ""
+    full_prompt: str = ""
+    messages: Optional[List[Dict[str, str]]] = None  # For message-based prompt format
+    
+    # Output data
+    response: str = ""
+    sources: List[Dict[str, Any]] = field(default_factory=list)
+    tokens: int = 0
+    processing_time: float = 0.0
+    
+    # Control flow
+    is_blocked: bool = False
+    error: Optional[str] = None
+    
+    # Metadata
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    config: Dict[str, Any] = field(default_factory=dict)
+    
+    # Security tracking
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    api_key: Optional[str] = None
+    timezone: Optional[str] = None
+    time_format: Optional[str] = None  # Per-adapter time format override
+    
+    # File context
+    file_ids: List[str] = field(default_factory=list)  # Optional list of file IDs for file context
+    
+    # Thread context
+    thread_id: Optional[str] = None  # Optional thread ID for follow-up questions on stored datasets
+    
+    # Audio input parameters (for STT)
+    audio_input: Optional[str] = None  # Base64-encoded audio data for STT
+    audio_format: Optional[str] = None  # Audio format (mp3, wav, etc.)
+    language: Optional[str] = None  # Language code for STT (e.g., "en-US")
+    
+    # Audio output parameters (for TTS)
+    return_audio: Optional[bool] = None  # Whether to return audio response (TTS)
+    tts_voice: Optional[str] = None  # Voice for TTS (e.g., "alloy", "echo" for OpenAI)
+    source_language: Optional[str] = None  # Source language for translation
+    target_language: Optional[str] = None  # Target language for translation
+    
+    # Stream cancellation
+    cancel_event: Optional[asyncio.Event] = None  # Event to signal stream cancellation
+
+    # Runtime model override (resolved from adapter's allowed_models at request time)
+    runtime_provider: Optional[str] = None
+    runtime_model_name: Optional[str] = None
+
+    # Skill invocation (set when client sends skill= in request)
+    requested_skill: Optional[str] = None
+    original_adapter_name: Optional[str] = None
+
+    # Image generation output
+    image: Optional[str] = None               # base64-encoded generated image
+    image_format: Optional[str] = None        # "png", "jpeg", or "webp"
+    image_revised_prompt: Optional[str] = None  # provider-rewritten prompt (e.g. DALL-E 3)
+    image_url: Optional[str] = None           # persistent server-side URL after storage
+
+    def has_error(self) -> bool:
+        """Check if the context has an error."""
+        return self.is_blocked or self.error is not None
+    
+    def set_error(self, error: str, block: bool = True) -> None:
+        """
+        Set an error on the context.
+
+        Args:
+            error: The error message
+            block: Whether to block further processing
+        """
+        self.error = error
+        if block:
+            self.is_blocked = True
+
+    def is_cancelled(self) -> bool:
+        """Check if stream cancellation was requested."""
+        return self.cancel_event is not None and self.cancel_event.is_set()
+
+
+class PipelineStep(ABC):
+    """
+    Base interface for pipeline steps.
+    
+    Each step in the pipeline implements this interface to process
+    the context and optionally modify it.
+    """
+    
+    def __init__(self, container: 'ServiceContainer'):
+        """
+        Initialize the pipeline step.
+        
+        Args:
+            container: The service container for dependency injection
+        """
+        self.container = container
+        self.logger = logging.getLogger(self.__class__.__name__)
+    
+    @abstractmethod
+    async def process(self, context: ProcessingContext) -> ProcessingContext:
+        """
+        Process the context and return modified context.
+        
+        Args:
+            context: The processing context
+            
+        Returns:
+            The modified context
+        """
+        pass
+    
+    @abstractmethod
+    def should_execute(self, context: ProcessingContext) -> bool:
+        """
+        Determine if this step should execute based on context.
+        
+        Args:
+            context: The processing context
+            
+        Returns:
+            True if the step should execute, False otherwise
+        """
+        pass
+    
+    def get_name(self) -> str:
+        """Get the name of this step."""
+        return self.__class__.__name__
+    
+    async def pre_process(self, context: ProcessingContext) -> None:
+        """
+        Hook called before processing.
+        
+        Override this method to add pre-processing logic.
+        
+        Args:
+            context: The processing context
+        """
+        pass
+    
+    async def post_process(self, context: ProcessingContext) -> None:
+        """
+        Hook called after processing.
+        
+        Override this method to add post-processing logic.
+        
+        Args:
+            context: The processing context
+        """
+        pass
+    
+    def supports_streaming(self) -> bool:
+        """
+        Check if this step supports streaming responses.
+        
+        Returns:
+            True if the step can handle streaming, False otherwise
+        """
+        return False
+    
+    async def process_stream(self, context: ProcessingContext) -> AsyncGenerator[str, None]:
+        """
+        Process the context for streaming response.
+        
+        This method should be implemented by steps that support streaming.
+        By default, it raises NotImplementedError.
+        
+        Args:
+            context: The processing context
+            
+        Yields:
+            Response chunks as they are generated
+        """
+        raise NotImplementedError(f"{self.get_name()} does not support streaming") 

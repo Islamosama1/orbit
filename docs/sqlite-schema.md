@@ -1,0 +1,674 @@
+# SQLite Database Schema
+
+This document describes the SQLite database schema used by Orbit when configured with the SQLite backend.
+
+## Overview
+
+Orbit uses SQLite as an alternative backend to MongoDB for data persistence. The SQLite database contains the following tables:
+
+- `users` - User accounts and authentication
+- `sessions` - Active user sessions
+- `api_keys` - API keys for authentication
+- `system_prompts` - System prompts for chat
+- `chat_history` - Chat message history
+- `conversation_threads` - Conversation threading for intent adapters
+- `uploaded_files` - Uploaded file metadata for file adapter workflows
+- `file_chunks` - Chunk metadata for processed uploaded files
+- `audit_logs` - Audit trail records for conversation logging and compliance
+- `audit_admin_logs` - Audit trail records for admin/auth mutations (user CRUD, API-key management, config changes, login/logout, etc.)
+- `feedback` - User feedback (thumbs up/down) on chat responses
+
+## Database File Location
+
+The database file location is configured in `config/config.yaml`:
+
+```yaml
+internal_services:
+  backend:
+    type: "sqlite"
+    sqlite:
+      database_path: "orbit.db"  # Default: orbit.db in project root
+```
+
+## Tables
+
+### users
+
+Stores user account information for authentication.
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    role TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_login TEXT
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique user ID (UUID)
+- `username` (TEXT, UNIQUE): Username for login
+- `password` (TEXT): Hashed password (PBKDF2)
+- `role` (TEXT): User role (e.g., "admin", "user")
+- `active` (INTEGER): Whether user is active (1=active, 0=inactive)
+- `created_at` (TEXT): ISO format timestamp of account creation
+- `last_login` (TEXT): ISO format timestamp of last login
+
+**Indexes:**
+- `idx_users_username` on `username`
+
+---
+
+### sessions
+
+Stores active user sessions for authentication.
+
+```sql
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    token TEXT UNIQUE NOT NULL,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    expires TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique session ID (UUID)
+- `token` (TEXT, UNIQUE): Session token
+- `user_id` (TEXT): ID of the user this session belongs to
+- `username` (TEXT): Username for quick reference
+- `expires` (TEXT): ISO format timestamp when session expires
+- `created_at` (TEXT): ISO format timestamp of session creation
+
+**Indexes:**
+- `idx_sessions_token` on `token`
+- `idx_sessions_expires` on `expires`
+
+---
+
+### api_keys
+
+Stores API keys for authentication and adapter configuration.
+
+```sql
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    api_key TEXT UNIQUE NOT NULL,
+    client_name TEXT NOT NULL,
+    notes TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    adapter_name TEXT,
+    system_prompt_id TEXT,
+    quota_daily_limit INTEGER,
+    quota_monthly_limit INTEGER,
+    quota_throttle_enabled INTEGER,
+    quota_throttle_priority INTEGER
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique API key ID (UUID)
+- `api_key` (TEXT, UNIQUE): The actual API key string
+- `client_name` (TEXT): Name of the client/application
+- `notes` (TEXT): Optional notes about the API key
+- `active` (INTEGER): Whether key is active (1=active, 0=inactive)
+- `created_at` (TEXT): ISO format timestamp of creation
+- `adapter_name` (TEXT): Associated adapter name (optional)
+- `system_prompt_id` (TEXT): Associated system prompt ID (optional)
+- `quota_daily_limit` (INTEGER): Optional per-key daily quota override
+- `quota_monthly_limit` (INTEGER): Optional per-key monthly quota override
+- `quota_throttle_enabled` (INTEGER): Optional per-key throttling override (1=true, 0=false)
+- `quota_throttle_priority` (INTEGER): Optional per-key throttling priority override
+
+**Indexes:**
+- `idx_api_keys_api_key` on `api_key`
+
+---
+
+### system_prompts
+
+Stores system prompts used for chat completions.
+
+```sql
+CREATE TABLE IF NOT EXISTS system_prompts (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    prompt TEXT NOT NULL,
+    version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique prompt ID (UUID)
+- `name` (TEXT, UNIQUE): Unique name for the prompt
+- `prompt` (TEXT): The actual prompt text
+- `version` (TEXT): Version identifier
+- `created_at` (TEXT): ISO format timestamp of creation
+- `updated_at` (TEXT): ISO format timestamp of last update
+
+**Indexes:**
+- `idx_system_prompts_name` on `name`
+
+---
+
+### chat_history
+
+Stores chat message history.
+
+```sql
+CREATE TABLE IF NOT EXISTS chat_history (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    user_id TEXT,
+    api_key TEXT,
+    metadata_json TEXT,
+    message_hash TEXT,
+    token_count INTEGER
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique message ID (UUID)
+- `session_id` (TEXT): Session identifier for grouping messages
+- `role` (TEXT): Message role ("user", "assistant", "system")
+- `content` (TEXT): Message content
+- `timestamp` (TEXT): ISO format timestamp of message
+- `user_id` (TEXT): Optional user ID
+- `api_key` (TEXT): Optional API key used
+- `metadata_json` (TEXT): JSON-encoded metadata
+- `message_hash` (TEXT): Hash for deduplication
+- `token_count` (INTEGER): Token count for the message (used for conversation history management)
+
+**Indexes:**
+- `idx_chat_history_session` on `(session_id, timestamp)`
+- `idx_chat_history_user` on `(user_id, timestamp)`
+- `idx_chat_history_timestamp` on `timestamp`
+- `idx_chat_history_api_key` on `api_key`
+- `idx_chat_history_hash` (UNIQUE) on `(session_id, message_hash)`
+
+---
+
+### conversation_threads
+
+Stores conversation thread metadata for follow-up questions on retrieved datasets from intent/QA adapters.
+
+```sql
+CREATE TABLE IF NOT EXISTS conversation_threads (
+    id TEXT PRIMARY KEY,
+    parent_message_id TEXT NOT NULL,
+    parent_session_id TEXT NOT NULL,
+    thread_session_id TEXT NOT NULL,
+    adapter_name TEXT NOT NULL,
+    query_context TEXT NOT NULL,
+    dataset_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    metadata_json TEXT
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique thread ID (UUID)
+- `parent_message_id` (TEXT): ID of the parent message that triggered the thread (references chat_history.id)
+- `parent_session_id` (TEXT): Session ID of the parent conversation
+- `thread_session_id` (TEXT): New session ID for the thread conversation
+- `adapter_name` (TEXT): Name of the adapter that generated the original response
+- `query_context` (TEXT): JSON-encoded query context (original query, parameters, template_id)
+- `dataset_key` (TEXT): Key/reference to stored dataset in Redis or fallback storage
+- `created_at` (TEXT): ISO format timestamp of thread creation
+- `expires_at` (TEXT): ISO format timestamp when thread expires (TTL)
+- `metadata_json` (TEXT): JSON-encoded additional metadata
+
+**Indexes:**
+- `idx_conversation_threads_parent_message` on `parent_message_id`
+- `idx_conversation_threads_parent_session` on `parent_session_id`
+- `idx_conversation_threads_thread_session` on `thread_session_id`
+- `idx_conversation_threads_expires_at` on `expires_at`
+
+---
+
+### uploaded_files
+
+Stores uploaded file metadata for retrieval and file adapter workflows.
+
+```sql
+CREATE TABLE IF NOT EXISTS uploaded_files (
+    id TEXT PRIMARY KEY,
+    api_key TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime_type TEXT,
+    file_size INTEGER,
+    upload_timestamp TEXT,
+    processing_status TEXT,
+    storage_key TEXT,
+    chunk_count INTEGER DEFAULT 0,
+    vector_store TEXT,
+    collection_name TEXT,
+    storage_type TEXT DEFAULT 'vector',
+    metadata_json TEXT,
+    embedding_provider TEXT,
+    embedding_dimensions INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique uploaded file ID (UUID)
+- `api_key` (TEXT): API key that uploaded the file
+- `filename` (TEXT): Original filename
+- `mime_type` (TEXT): File MIME type
+- `file_size` (INTEGER): File size in bytes
+- `upload_timestamp` (TEXT): Upload timestamp
+- `processing_status` (TEXT): Processing state for the file
+- `storage_key` (TEXT): Storage key for persisted file content
+- `chunk_count` (INTEGER): Number of generated chunks
+- `vector_store` (TEXT): Vector store backend name
+- `collection_name` (TEXT): Collection/index used for retrieval
+- `storage_type` (TEXT): Storage mode, defaults to `vector`
+- `metadata_json` (TEXT): JSON-encoded file metadata
+- `embedding_provider` (TEXT): Embedding provider used
+- `embedding_dimensions` (INTEGER): Embedding vector dimensions
+- `created_at` (TEXT): Creation timestamp
+
+**Indexes:**
+- `idx_uploaded_files_api_key` on `api_key`
+- `idx_uploaded_files_processing_status` on `processing_status`
+
+---
+
+### file_chunks
+
+Stores metadata for chunks produced from uploaded files.
+
+```sql
+CREATE TABLE IF NOT EXISTS file_chunks (
+    id TEXT PRIMARY KEY,
+    file_id TEXT NOT NULL,
+    chunk_index INTEGER,
+    vector_store_id TEXT,
+    collection_name TEXT,
+    chunk_metadata TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_id) REFERENCES uploaded_files(id)
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique chunk ID (UUID)
+- `file_id` (TEXT): Parent uploaded file ID
+- `chunk_index` (INTEGER): Chunk position within the file
+- `vector_store_id` (TEXT): Vector-store-specific chunk/document ID
+- `collection_name` (TEXT): Collection/index holding the chunk embedding
+- `chunk_metadata` (TEXT): Serialized chunk metadata
+- `created_at` (TEXT): Creation timestamp
+
+**Indexes:**
+- `idx_file_chunks_file_id` on `file_id`
+
+---
+
+### audit_logs
+
+Stores audit trail records for conversation logging and compliance.
+
+```sql
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    query TEXT NOT NULL,
+    response TEXT NOT NULL,
+    response_compressed INTEGER NOT NULL DEFAULT 0,
+    backend TEXT,
+    blocked INTEGER NOT NULL DEFAULT 0,
+    ip TEXT,
+    ip_type TEXT,
+    ip_is_local INTEGER DEFAULT 0,
+    ip_source TEXT,
+    ip_original_value TEXT,
+    api_key_value TEXT,
+    api_key_timestamp TEXT,
+    session_id TEXT,
+    user_id TEXT,
+    adapter_name TEXT
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique audit record ID (UUID)
+- `timestamp` (TEXT): ISO format timestamp of the conversation
+- `query` (TEXT): The user's query/message
+- `response` (TEXT): The system's response (plain text or base64-encoded gzip if compressed)
+- `response_compressed` (INTEGER): Whether response is compressed (1=compressed, 0=plain text)
+- `backend` (TEXT): The inference backend used (e.g., "ollama", "openai")
+- `blocked` (INTEGER): Whether the query was blocked (1=blocked, 0=allowed)
+- `ip` (TEXT): Client IP address
+- `ip_type` (TEXT): IP address type ("ipv4", "ipv6", "local", "unknown")
+- `ip_is_local` (INTEGER): Whether the IP is local/private (1=true, 0=false)
+- `ip_source` (TEXT): IP source ("direct", "proxy", "unknown")
+- `ip_original_value` (TEXT): Original IP value before processing
+- `api_key_value` (TEXT): API key used for the request (if any)
+- `api_key_timestamp` (TEXT): ISO timestamp when API key was used
+- `session_id` (TEXT): Session identifier for the conversation
+- `user_id` (TEXT): User identifier (if authenticated)
+- `adapter_name` (TEXT): Adapter used to service the request
+
+**Indexes:**
+- `idx_audit_logs_timestamp` on `timestamp`
+- `idx_audit_logs_session_id` on `session_id`
+- `idx_audit_logs_user_id` on `user_id`
+- `idx_audit_logs_blocked` on `blocked`
+- `idx_audit_logs_backend` on `backend`
+- `idx_audit_logs_adapter_name` on `adapter_name`
+
+**Configuration:**
+The audit storage backend is configured in `config/config.yaml`:
+
+```yaml
+internal_services:
+  audit:
+    enabled: true
+    storage_backend: "database"  # "elasticsearch", "sqlite", "mongodb", or "database"
+    collection_name: "audit_logs"
+    compress_responses: false    # Enable gzip compression for response field
+```
+
+When `storage_backend` is set to `"database"`, the audit service uses the same backend as configured in `internal_services.backend.type`.
+
+**Response Compression:**
+When `compress_responses: true`, the response field is stored as base64-encoded gzip data. This typically reduces storage by 70-90% for LLM responses. The `response_compressed` field indicates whether decompression is needed when reading. Set to `false` during development/testing to see plain text responses in the database.
+
+---
+
+### audit_admin_logs
+
+Stores audit trail records for privileged operations on `/admin/*` and `/auth/*` endpoints. Populated by the admin-audit middleware when `internal_services.audit.admin_events.enabled` is `true`. Only mutations (POST/PUT/PATCH/DELETE) are recorded; read-only GETs are skipped.
+
+```sql
+CREATE TABLE IF NOT EXISTS audit_admin_logs (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    action TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT,
+    actor_username TEXT,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status_code INTEGER NOT NULL,
+    success INTEGER NOT NULL DEFAULT 0,
+    ip TEXT,
+    ip_type TEXT,
+    ip_is_local INTEGER DEFAULT 0,
+    ip_source TEXT,
+    ip_original_value TEXT,
+    user_agent TEXT,
+    error_message TEXT,
+    request_summary TEXT
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique record ID (UUID)
+- `timestamp` (TEXT): ISO format timestamp of the event
+- `event_type` (TEXT): Canonical event name (e.g. `auth.login`, `admin.api_key.create`, `admin.config.update`)
+- `action` (TEXT): Operation class (`CREATE`, `UPDATE`, `DELETE`, `LOGIN`, `LOGOUT`, `CONTROL`)
+- `resource_type` (TEXT): Kind of resource affected (`user`, `api_key`, `adapter`, `config`, `prompt`, `session`, `server`, ...)
+- `resource_id` (TEXT): Identifier of the affected resource (path param, body field, or actor id, depending on the route)
+- `actor_type` (TEXT): Who initiated the action (`user`, `api_key`, `anonymous`)
+- `actor_id` (TEXT): User ID for `user` actors; masked API key for `api_key` actors; `NULL` for anonymous
+- `actor_username` (TEXT): Username (when the actor is an authenticated user)
+- `method` (TEXT): HTTP method (POST/PUT/PATCH/DELETE)
+- `path` (TEXT): Concrete request path (not a template)
+- `status_code` (INTEGER): HTTP response status
+- `success` (INTEGER): `1` if `status_code < 400`, else `0`
+- `ip` (TEXT): Client IP address (cleaned)
+- `ip_type` (TEXT): IP address type (`ipv4`, `ipv6`, `local`, `unknown`)
+- `ip_is_local` (INTEGER): Whether the IP is local/private (1=true, 0=false)
+- `ip_source` (TEXT): `direct` or `proxy` (from `X-Forwarded-For`)
+- `ip_original_value` (TEXT): Raw IP value before parsing
+- `user_agent` (TEXT): Request `User-Agent` header
+- `error_message` (TEXT): Short marker for failed requests (e.g. `HTTP 401`)
+- `request_summary` (TEXT): JSON-encoded, secret-scrubbed subset of the request body. Per-route allowlists ensure passwords, raw API keys, and prompt bodies are never stored; config/adapter-config updates record only the list of changed top-level keys (no values).
+
+**Indexes:**
+- `idx_audit_admin_logs_timestamp` on `timestamp`
+- `idx_audit_admin_logs_actor_id` on `actor_id`
+- `idx_audit_admin_logs_event_type` on `event_type`
+- `idx_audit_admin_logs_resource_type` on `resource_type`
+- `idx_audit_admin_logs_success` on `success`
+
+**Configuration:**
+Admin-event auditing is opt-in and configured in `config/config.yaml` under the main audit block:
+
+```yaml
+internal_services:
+  audit:
+    enabled: true                     # Master audit toggle (required)
+    admin_events:
+      enabled: true                   # Enable admin/auth event auditing
+      collection_name: "audit_admin_logs"
+```
+
+When `audit.enabled` is `false`, admin-event auditing is forced off regardless of the `admin_events.enabled` flag. Audit write failures are logged and swallowed — they never break the underlying admin action.
+
+---
+
+### feedback
+
+Stores user feedback (thumbs up/down) on chat responses.
+
+```sql
+CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    user_id TEXT,
+    feedback_type TEXT NOT NULL,
+    adapter_name TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+```
+
+**Fields:**
+- `id` (TEXT, PK): Unique feedback ID (UUID)
+- `message_id` (TEXT): Database message ID of the assistant response (references chat_history.id)
+- `session_id` (TEXT): Session identifier
+- `user_id` (TEXT): Optional user ID (when auth is enabled)
+- `feedback_type` (TEXT): Feedback value ("up" or "down")
+- `adapter_name` (TEXT): Adapter that generated the response
+- `created_at` (TEXT): ISO format timestamp of feedback creation
+- `updated_at` (TEXT): ISO format timestamp of last update
+
+**Indexes:**
+- `idx_feedback_message_session` (UNIQUE) on `(message_id, session_id)` - one feedback per message per session
+- `idx_feedback_session` on `session_id`
+- `idx_feedback_type` on `feedback_type`
+- `idx_feedback_adapter` on `adapter_name`
+
+---
+
+## Data Types
+
+### ID Fields
+All `id` fields use UUID v4 format as TEXT:
+```
+"550e8400-e29b-41d4-a716-446655440000"
+```
+
+### Timestamps
+All timestamp fields use ISO 8601 format as TEXT:
+```
+"2025-10-27T12:58:34.123456"
+```
+
+### Boolean Fields
+Boolean values are stored as INTEGER:
+- `1` = True
+- `0` = False
+
+### JSON Fields
+Fields ending in `_json` store JSON-encoded data as TEXT:
+```json
+{"key": "value", "nested": {"data": 123}}
+```
+
+---
+
+## Compatibility Notes
+
+### MongoDB Field Mapping
+
+When migrating from MongoDB or using code that expects MongoDB format:
+
+| MongoDB Field | SQLite Field | Notes |
+|--------------|-------------|-------|
+| `_id` | `id` | Converted automatically in abstraction layer |
+| ObjectId | UUID string | Both are unique identifiers |
+| `metadata` | `metadata_json` | JSON serialization/deserialization |
+| ISODate | ISO string | Datetime to/from string conversion |
+| Boolean | Integer | 1/0 for true/false |
+
+### Query Translation
+
+MongoDB-style queries are automatically translated to SQL:
+
+| MongoDB Query | SQL Translation |
+|--------------|----------------|
+| `{"field": "value"}` | `WHERE field = 'value'` |
+| `{"field": {"$gt": 10}}` | `WHERE field > 10` |
+| `{"field": {"$in": [1, 2, 3]}}` | `WHERE field IN (1, 2, 3)` |
+| `{"field": {"$regex": "pattern"}}` | `WHERE field LIKE '%pattern%'` |
+
+---
+
+## Maintenance
+
+### Database File Management
+
+The SQLite database is a single file that can be:
+- **Backed up**: Simply copy the `orbit.db` file
+- **Restored**: Replace the `orbit.db` file
+- **Moved**: Update the `database_path` in config
+- **Deleted**: Remove the file to start fresh
+
+### Performance Considerations
+
+SQLite is suitable for:
+- Development and testing
+- Small to medium deployments
+- Single-server setups
+- Applications with < 100k chat messages
+
+For larger deployments, consider using MongoDB backend.
+
+### Database Inspection
+
+You can inspect the SQLite database using the `sqlite3` command-line tool:
+
+```bash
+# Open the database
+sqlite3 orbit.db
+
+# List all tables
+.tables
+
+# Show table schema
+.schema users
+
+# Query data
+SELECT * FROM users;
+
+# Exit
+.quit
+```
+
+Or use a GUI tool like:
+- [DB Browser for SQLite](https://sqlitebrowser.org/)
+- [SQLite Studio](https://sqlitestudio.pl/)
+- [DBeaver](https://dbeaver.io/)
+
+---
+
+## Migration
+
+### From MongoDB to SQLite
+
+There is no built-in migration tool. To migrate:
+
+1. Export data from MongoDB using `mongoexport`
+2. Transform to SQLite-compatible format
+3. Import using SQL INSERT statements or Python script
+
+### From SQLite to MongoDB
+
+1. Read data from SQLite using Python
+2. Transform IDs (UUID → ObjectId)
+3. Insert into MongoDB collections
+
+---
+
+## Security
+
+### Password Storage
+
+User passwords are hashed using PBKDF2 with:
+- 600,000 iterations
+- SHA-256 hash function
+- Salt per password
+
+### API Keys
+
+API keys are stored in plain text as they need to be compared directly. Ensure:
+- Database file permissions are restricted
+- Use strong, random API keys
+- Rotate keys regularly
+
+### Database File Permissions
+
+Secure the database file:
+```bash
+chmod 600 orbit.db  # Owner read/write only
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+**Database locked error:**
+- SQLite uses file-level locking
+- Ensure only one process accesses the database
+- Use WAL mode for better concurrency (enabled by default)
+
+**Performance issues:**
+- Add indexes for frequently queried fields
+- Use VACUUM to reclaim space
+- Consider switching to MongoDB for high-traffic scenarios
+
+**Corruption:**
+- Run integrity check: `sqlite3 orbit.db "PRAGMA integrity_check;"`
+- Restore from backup if corrupted
+
+---
+
+## Version History
+
+- **v1.0** (2025-10-27): Initial SQLite backend implementation
+  - Basic tables for users, sessions, api_keys, system_prompts
+  - Chat history and archive tables
+  - Full compatibility with MongoDB abstraction layer

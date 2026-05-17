@@ -1,0 +1,660 @@
+#!/usr/bin/env node
+/**
+ * ORBIT Chat CLI
+ *
+ * Serves the chat-app as a standalone application with runtime configuration.
+ * Configuration is read from orbitchat.yaml.
+ * Secrets come from VITE_ADAPTER_KEYS / ORBIT_ADAPTER_KEYS env var.
+ */
+
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { execFileSync } from 'child_process';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import { createProxyMiddleware } from 'http-proxy-middleware';
+import yaml from 'js-yaml';
+import rateLimit from 'express-rate-limit';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function getCliVersion() {
+  try {
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    return pkg.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function printHelp() {
+  console.log(`orbitchat [options]
+
+Options:
+  --port PORT        Server port (default: 5173)
+  --host HOST        Server host (default: localhost)
+  --open             Open browser automatically
+  --config PATH      Path to orbitchat.yaml (default: ./orbitchat.yaml)
+  --api-only         Run API proxy only (no UI serving)
+  --cors-origin URL  Allowed CORS origin in api-only mode (default: *)
+  --help, -h         Show help message
+  --version, -v      Show version number`);
+}
+
+// ---- Minimal .env loader ----
+
+function parseDotEnvValue(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function loadDotEnvFromFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const content = fs.readFileSync(filePath, 'utf8');
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const equalsIndex = trimmed.indexOf('=');
+    if (equalsIndex <= 0) continue;
+    const key = trimmed.slice(0, equalsIndex).trim();
+    if (process.env[key] !== undefined) continue;
+    let valueRaw = trimmed.slice(equalsIndex + 1);
+    const startsWithDouble = valueRaw.startsWith('"');
+    const startsWithSingle = valueRaw.startsWith("'");
+    if ((startsWithDouble && !valueRaw.endsWith('"')) || (startsWithSingle && !valueRaw.endsWith("'"))) {
+      const quote = startsWithDouble ? '"' : "'";
+      while (i + 1 < lines.length) {
+        i += 1;
+        valueRaw += `\n${lines[i]}`;
+        if (lines[i].trim().endsWith(quote)) break;
+      }
+    }
+    process.env[key] = parseDotEnvValue(valueRaw);
+  }
+}
+
+function loadDotEnv(baseDir) {
+  loadDotEnvFromFile(path.join(baseDir, '.env.local'));
+  loadDotEnvFromFile(path.join(baseDir, '.env'));
+}
+
+// ---- Deep Merge ----
+
+function isObject(item) {
+  return typeof item === 'object' && item !== null && !Array.isArray(item);
+}
+
+function deepMerge(target, source) {
+  if (!isObject(target) || !isObject(source)) return source;
+  const output = { ...target };
+  Object.keys(source).forEach(key => {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') return;
+    if (isObject(target[key]) && isObject(source[key])) {
+      output[key] = deepMerge(target[key], source[key]);
+    } else if (source[key] !== undefined) {
+      output[key] = source[key];
+    }
+  });
+  return output;
+}
+
+// ---- Defaults ----
+
+const DEFAULTS = {
+  agentMode: {
+    mode: 'multi',
+    defaultAdapterId: '',
+  },
+  application: {
+    name: 'ORBIT Chat',
+    description: "Explore ideas with ORBIT's AI copilots, share context, and build together.",
+    inputPlaceholder: 'Message ORBIT...',
+    settingsAboutMsg: 'ORBIT Chat',
+    locale: 'en-US',
+    favicon: '',
+  },
+  debug: {
+    consoleDebug: false,
+  },
+  seo: {
+    includeSitemap: false,
+    siteUrl: '',
+    alternateSiteUrls: [],
+    hostPatterns: [],
+    exposeAgentNotes: true,
+  },
+  features: {
+    enableUpload: false,
+    enableAudioOutput: false,
+    enableAudioInput: false,
+    enableFeedbackButtons: false,
+    enableConversationThreads: true,
+    enableAutocomplete: false,
+  },
+  voice: {
+    silenceTimeoutMs: 4000,
+    recognitionLanguage: '',
+  },
+  outOfServiceMessage: null,
+  limits: {
+    files: { perConversation: 5, maxSizeMB: 50, totalFiles: 100 },
+    conversations: { maxConversations: 10, messagesPerConversation: 1000, messagesPerThread: 1000, totalMessages: 10000 },
+    messages: { maxLength: 1000 },
+  },
+  guestLimits: {
+    files: { perConversation: 1, maxSizeMB: 10, totalFiles: 2 },
+    conversations: { maxConversations: 1, messagesPerConversation: 10, messagesPerThread: 10, totalMessages: 10 },
+    messages: { maxLength: 500 },
+  },
+  auth: { enabled: false, domain: '', clientId: '', audience: '' },
+  header: { enabled: false, logoUrl: '', logoUrlLight: '', logoUrlDark: '', logoHeight: '', logoWidth: '', bgColor: '', textColor: '', showBorder: true, navLinks: [] },
+  footer: { enabled: false, text: '', bgColor: '', textColor: '', showBorder: false, layout: 'stacked', align: 'center', topPadding: 'large', navLinks: [] },
+  startupScripts: [],
+  adapters: [],
+};
+
+function slugifyAdapterName(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function normalizeConcreteOrigin(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed || trimmed.includes('*')) {
+    return null;
+  }
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return null;
+  }
+}
+
+function buildRobotsTxt(config) {
+  const canonicalOrigin = normalizeConcreteOrigin(config?.seo?.siteUrl);
+  if (!canonicalOrigin) {
+    return null;
+  }
+
+  return `User-agent: *
+Allow: /
+
+Sitemap: ${canonicalOrigin}/sitemap.xml
+`;
+}
+
+function buildSitemapXml(config, adapters) {
+  if (!config?.seo?.includeSitemap) {
+    return null;
+  }
+
+  const canonicalOrigin = normalizeConcreteOrigin(config?.seo?.siteUrl);
+  if (!canonicalOrigin) {
+    console.warn('[orbitchat] seo.includeSitemap is enabled but seo.siteUrl is empty; /sitemap.xml will not be served.');
+    return null;
+  }
+
+  const alternateOrigins = Array.isArray(config?.seo?.alternateSiteUrls)
+    ? config.seo.alternateSiteUrls.map(normalizeConcreteOrigin).filter(Boolean)
+    : [];
+  const wildcardEntries = Array.isArray(config?.seo?.hostPatterns)
+    ? config.seo.hostPatterns.filter(value => typeof value === 'string' && value.includes('*'))
+    : [];
+  if (wildcardEntries.length > 0) {
+    console.warn('[orbitchat] seo.hostPatterns supports wildcard hosts at runtime, but wildcard hosts are not added to sitemap.xml.');
+  }
+
+  const sitemapOrigins = Array.from(new Set([canonicalOrigin, ...alternateOrigins]));
+  const urls = new Set();
+  const mode = config.agentMode?.mode === 'single' ? 'single' : 'multi';
+
+  if (mode === 'single') {
+    sitemapOrigins.forEach((origin) => {
+      urls.add(`${origin}/`);
+    });
+  } else {
+    Object.keys(adapters || {}).forEach((adapterId) => {
+      const adapter = adapters[adapterId];
+      const slug = slugifyAdapterName(adapter?.name || adapterId);
+      if (slug) {
+        sitemapOrigins.forEach((origin) => {
+          urls.add(`${origin}/${slug}`);
+        });
+      }
+    });
+  }
+
+  if (urls.size === 0) {
+    return null;
+  }
+
+  const lastmod = new Date().toISOString();
+  const urlEntries = Array.from(urls)
+    .sort((a, b) => a.localeCompare(b))
+    .map((url) => `  <url>\n    <loc>${escapeXml(url)}</loc>\n    <lastmod>${lastmod}</lastmod>\n  </url>`)
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlEntries}\n</urlset>\n`;
+}
+
+// ---- YAML config loading ----
+
+function loadYamlConfig(configPath) {
+  try {
+    if (fs.existsSync(configPath)) {
+      const content = fs.readFileSync(configPath, 'utf8');
+      return yaml.load(content);
+    }
+  } catch (error) {
+    console.error(`Error: Failed to parse ${configPath}: ${error.message}`);
+    process.exit(1);
+  }
+  return null;
+}
+
+// ---- Local asset handling ----
+
+function resolveLocalAssetPath(rawValue, yamlPath) {
+  if (!rawValue || typeof rawValue !== 'string') return null;
+  const value = rawValue.trim();
+  if (!value || /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(value) || value.startsWith('//')) return null;
+  const expandedValue = value.startsWith('~/') ? path.join(process.env.HOME || '', value.slice(2)) : value;
+  const yamlDir = path.dirname(yamlPath);
+  const candidates = path.isAbsolute(expandedValue) ? [expandedValue] : [path.resolve(yamlDir, expandedValue), path.resolve(process.cwd(), expandedValue)];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return fs.realpathSync(candidate);
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+// ---- Adapter loading (env secrets + YAML metadata) ----
+
+function loadAdaptersForProxy(yamlAdapters) {
+  const adapters = {};
+  const fallbackApiUrl = 'http://localhost:3000';
+
+  if (Array.isArray(yamlAdapters)) {
+    for (const ya of yamlAdapters) {
+      if (!ya.id) {
+        console.warn(`[orbitchat] Adapter "${ya.name || '(unnamed)'}" is missing a required 'id' field — skipping.`);
+        continue;
+      }
+      const id = ya.id;
+      adapters[id] = {
+        apiKey: '',
+        apiUrl: ya.apiUrl || fallbackApiUrl,
+        name: ya.name,
+        description: ya.description,
+        notes: ya.notes,
+        model: ya.model,
+        inputPlaceholder: ya.inputPlaceholder
+      };
+    }
+  }
+
+  const envKeysRaw = process.env.VITE_ADAPTER_KEYS || process.env.ORBIT_ADAPTER_KEYS;
+  if (envKeysRaw) {
+    try {
+      const keys = JSON.parse(envKeysRaw);
+      for (const [id, value] of Object.entries(keys)) {
+        if (!adapters[id]) {
+          // Strict mode: only adapters explicitly declared in orbitchat.yaml are allowed.
+          continue;
+        }
+        const isObjectValue = typeof value === 'object' && value !== null;
+        const apiKey = isObjectValue
+          ? String(value.apiKey || value.key || '')
+          : String(value);
+        const apiUrl = isObjectValue && value.apiUrl ? String(value.apiUrl) : undefined;
+        const description = isObjectValue && value.description ? String(value.description) : undefined;
+        const notes = isObjectValue && value.notes ? String(value.notes) : undefined;
+        const model = isObjectValue && value.model ? String(value.model) : undefined;
+        adapters[id].apiKey = apiKey;
+        if (apiUrl) adapters[id].apiUrl = apiUrl;
+        if (description !== undefined) adapters[id].description = description;
+        if (notes !== undefined) adapters[id].notes = notes;
+        if (model !== undefined) adapters[id].model = model;
+      }
+    } catch { /* ignore */ }
+  }
+
+  const finalAdapters = {};
+  for (const [id, config] of Object.entries(adapters)) {
+    if (config.apiKey) finalAdapters[id] = config;
+  }
+  if (Object.keys(finalAdapters).length > 0) {
+    console.debug(`Loaded ${Object.keys(finalAdapters).length} adapters with API keys from environment.`);
+  }
+  return Object.keys(finalAdapters).length > 0 ? finalAdapters : null;
+}
+
+// ---- Express server ----
+
+function createServer(distPath, config, serverConfig = {}) {
+  const app = express();
+  const adapters = loadAdaptersForProxy(config.adapters);
+  const apiOnly = serverConfig.apiOnly || false;
+  const robotsTxt = buildRobotsTxt(config);
+  const sitemapXml = buildSitemapXml(config, adapters);
+  const localAssets = serverConfig.localAssets || {};
+  const trustProxy = serverConfig.trustProxy;
+
+  // For deployments behind reverse proxies, trust forwarded headers when configured.
+  if (typeof trustProxy !== 'undefined') {
+    app.set('trust proxy', trustProxy);
+  }
+
+  if (apiOnly) {
+    const allowedOrigin = serverConfig.corsOrigin || '*';
+    app.use((req, res, next) => {
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-Session-ID, X-Thread-ID, X-Adapter-Name, Accept, Authorization');
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+      next();
+    });
+  }
+
+  if (Object.keys(localAssets).length > 0) {
+    app.get('/__orbitchat_assets/:assetId', (req, res) => {
+      const assetPath = localAssets[req.params.assetId];
+      if (!assetPath || !fs.existsSync(assetPath)) return res.status(404).send('Asset not found');
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.sendFile(assetPath);
+    });
+  }
+
+  // Guest rate limiting — only applies to unauthenticated requests.
+  // Exempt read-only endpoints, file operations, and adapter info to avoid
+  // hitting limits during normal page load and file upload workflows.
+  if (serverConfig.rateLimit?.enabled !== false) {
+    const rl = serverConfig.rateLimit || {};
+    const rateLimitWindowMs = rl.windowMs || 60000;
+    const retryAfterSeconds = Math.ceil(rateLimitWindowMs / 1000);
+
+    const isExemptPath = (req) =>
+      req.method === 'OPTIONS' ||
+      req.path === '/adapters' ||
+      req.path.startsWith('/files') ||
+      req.path.startsWith('/admin/adapters') ||
+      req.path.startsWith('/admin/chat-history');
+
+    const apiLimiter = rateLimit({
+      windowMs: rateLimitWindowMs, max: rl.maxRequests || 60,
+      skip: isExemptPath,
+      handler: (_req, res) => {
+        res.setHeader('Retry-After', retryAfterSeconds);
+        res.status(429).json({ error: 'Too many requests' });
+      },
+    });
+    const chatLimiter = rateLimit({
+      windowMs: rl.chat?.windowMs || 60000, max: rl.chat?.maxRequests || 10,
+      handler: (_req, res) => {
+        res.setHeader('Retry-After', Math.ceil((rl.chat?.windowMs || 60000) / 1000));
+        res.status(429).json({ error: 'Chat rate limit exceeded' });
+      },
+    });
+    app.use('/api', (req, res, next) => { if (req.headers.authorization) return next(); apiLimiter(req, res, next); });
+    app.use('/api', (req, res, next) => {
+      if (req.headers.authorization) return next();
+      if (req.method === 'POST' && (/\/chat/i.test(req.path) || /\/stream/i.test(req.path))) return chatLimiter(req, res, next);
+      next();
+    });
+  }
+
+  if (adapters) {
+    // Lazy model hydration for adapter cards (mirrors vite dev behavior).
+    let modelsLastFetchedAt = 0;
+    let modelsFetchInFlight = null;
+    const MODELS_CACHE_TTL_MS = 30000;
+
+    async function fetchAdapterModels(adapterMap, force = false) {
+      const now = Date.now();
+      if (!force && (now - modelsLastFetchedAt) < MODELS_CACHE_TTL_MS) return;
+      if (modelsFetchInFlight) return modelsFetchInFlight;
+
+      modelsFetchInFlight = (async () => {
+        const fetches = Object.entries(adapterMap).map(async ([, adapter]) => {
+          if (!adapter.apiUrl || !adapter.apiKey) return;
+          try {
+            const url = `${String(adapter.apiUrl).replace(/\/+$/, '')}/admin/adapters/info`;
+            const resp = await fetch(url, {
+              headers: { 'X-API-Key': adapter.apiKey },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (resp.ok) {
+              const info = await resp.json();
+              adapter.model = typeof info?.model === 'string' ? info.model.trim() || undefined : undefined;
+            }
+          } catch {
+            // Best-effort only; cards can render without model metadata.
+          }
+        });
+        await Promise.all(fetches);
+        modelsLastFetchedAt = Date.now();
+      })().finally(() => {
+        modelsFetchInFlight = null;
+      });
+
+      return modelsFetchInFlight;
+    }
+
+    const buildAdapterList = (adapterMap) =>
+      Object.keys(adapterMap).map(id => ({
+        id,
+        name: adapterMap[id].name || id,
+        description: adapterMap[id].description,
+        notes: adapterMap[id].notes,
+        model: adapterMap[id].model || null,
+        inputPlaceholder: adapterMap[id].inputPlaceholder
+      }));
+
+    app.get('/api/adapters', (req, res) => {
+      const cacheControlHeader = typeof req.headers['cache-control'] === 'string' ? req.headers['cache-control'] : '';
+      const forceRefresh = req.url?.includes('refresh=1') || cacheControlHeader.includes('no-cache');
+
+      fetchAdapterModels(adapters, forceRefresh).then(() => {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ adapters: buildAdapterList(adapters) });
+      }).catch(() => {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ adapters: buildAdapterList(adapters) });
+      });
+    });
+
+    const dynamicProxy = createProxyMiddleware({
+      target: 'http://localhost:3000', // Default fallback
+      router: (req) => {
+        const adapterName = req.headers['x-adapter-name'];
+        return adapters[adapterName]?.apiUrl;
+      },
+      changeOrigin: true,
+      pathRewrite: (p) => p.startsWith('/files') || p.startsWith('/threads') || p.startsWith('/feedback') ? '/api' + p : p,
+      on: {
+        proxyReq: (proxyReq, reqIncoming) => {
+          const adapterName = reqIncoming.headers['x-adapter-name'];
+          const adapter = adapters[adapterName];
+          if (adapter) {
+            proxyReq.setHeader('X-API-Key', adapter.apiKey);
+          }
+          proxyReq.removeHeader('x-adapter-name');
+          proxyReq.removeHeader('x-user-id');
+          ['content-type', 'x-session-id', 'x-thread-id', 'accept', 'content-length', 'authorization'].forEach(h => {
+            if (reqIncoming.headers[h]) proxyReq.setHeader(h, reqIncoming.headers[h]);
+          });
+          if (!reqIncoming.headers.authorization && reqIncoming.headers['x-user-id']) {
+            proxyReq.setHeader('X-User-ID', reqIncoming.headers['x-user-id']);
+          }
+        },
+        error: (err, _req, resProxy) => {
+          console.error('[Proxy] Proxy error:', err);
+          if (!resProxy.headersSent) {
+            resProxy.status(500).json({ error: 'Proxy error', message: err.message });
+          }
+        }
+      },
+      logLevel: 'silent',
+    });
+
+    app.use('/api', (req, res, next) => {
+      if (req.path === '/adapters') return next('route');
+      const adapterName = req.headers['x-adapter-name'];
+      if (!adapterName) return res.status(400).json({ error: 'X-Adapter-Name header is required' });
+      if (!adapters[adapterName]) return res.status(404).json({ error: `Adapter '${adapterName}' not found` });
+      dynamicProxy(req, res, next);
+    });
+  }
+
+  app.use(express.json());
+  if (robotsTxt) {
+    app.get('/robots.txt', (_req, res) => {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.send(robotsTxt);
+    });
+  }
+  if (sitemapXml) {
+    app.get('/sitemap.xml', (_req, res) => {
+      res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+      res.send(sitemapXml);
+    });
+  }
+  if (!apiOnly && distPath) {
+    app.use(express.static(distPath, { index: false }));
+
+    // Pre-build the index.html template once at startup instead of reading on every request
+    const indexPath = path.join(distPath, 'index.html');
+    let indexTemplate = null;
+    try {
+      indexTemplate = fs.readFileSync(indexPath, 'utf8');
+    } catch (err) {
+      console.error(`[orbitchat] Failed to read ${indexPath}:`, err.message);
+    }
+
+    // Escape </script> sequences in JSON to prevent XSS when injecting into HTML
+    const safeConfigJson = JSON.stringify(config).replace(/<\/(script)/gi, '<\\/$1');
+
+    // Pre-compute the transformed HTML
+    let cachedHtml = null;
+    if (indexTemplate) {
+      let content = indexTemplate;
+      content = content.replace(/<script id="orbit-chat-config" type="application\/json">[\s\S]*?<\/script>/, '<!-- Config injected -->');
+      const configScript = `<script>window.ORBIT_CHAT_CONFIG = ${safeConfigJson};</script>`;
+      content = content.replace(/<head>/i, '<head>\n    ' + configScript);
+      if (config.application?.name) content = content.replace(/<title>.*?<\/title>/i, `<title>${config.application.name}</title>`);
+      if (config.application?.favicon?.trim()) {
+        const iconTag = `<link rel="icon" href="${config.application.favicon}" />`;
+        if (/<link[^>]*rel=["']icon["'][^>]*>/i.test(content)) {
+          content = content.replace(/<link[^>]*rel=["']icon["'][^>]*>/i, iconTag);
+        } else {
+          content = content.replace(/<head>/i, `<head>\n    ${iconTag}`);
+        }
+      }
+      cachedHtml = content;
+    }
+
+    app.get(/(.*)/, (req, res) => {
+      if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found' });
+      if (!cachedHtml) return res.status(500).send('index.html not found');
+      res.setHeader('Content-Type', 'text/html');
+      res.send(cachedHtml);
+    });
+  }
+  return app;
+}
+
+// ---- Main ----
+
+function main() {
+  const args = process.argv.slice(2);
+  const serverConfig = { port: 5173, host: 'localhost', open: false, configFile: null, apiOnly: false, corsOrigin: '*' };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--port') serverConfig.port = parseInt(args[++i], 10);
+    else if (args[i] === '--host') serverConfig.host = args[++i];
+    else if (args[i] === '--open') serverConfig.open = true;
+    else if (args[i] === '--config') serverConfig.configFile = args[++i];
+    else if (args[i] === '--api-only') serverConfig.apiOnly = true;
+    else if (args[i] === '--cors-origin') serverConfig.corsOrigin = args[++i];
+    else if (args[i] === '--help' || args[i] === '-h') { printHelp(); return; }
+    else if (args[i] === '--version' || args[i] === '-v') { console.log(getCliVersion()); return; }
+    else if (args[i].startsWith('-')) { console.error(`Unknown option: ${args[i]}\n`); printHelp(); process.exit(1); }
+  }
+
+  loadDotEnv(process.cwd());
+  const yamlPath = serverConfig.configFile || path.join(process.cwd(), 'orbitchat.yaml');
+  const yamlObj = loadYamlConfig(yamlPath);
+  let config = deepMerge(DEFAULTS, yamlObj || {});
+
+  // Overlay secret env vars if they exist
+  if (process.env.VITE_AUTH_DOMAIN) config.auth.domain = process.env.VITE_AUTH_DOMAIN;
+  if (process.env.VITE_AUTH_CLIENT_ID) config.auth.clientId = process.env.VITE_AUTH_CLIENT_ID;
+  if (process.env.VITE_AUTH_AUDIENCE) config.auth.audience = process.env.VITE_AUTH_AUDIENCE;
+
+  const localAssets = {};
+  const mapHeaderLogoAsset = (fieldName, assetId) => {
+    const resPath = resolveLocalAssetPath(config.header?.[fieldName], yamlPath);
+    if (!resPath) return;
+    localAssets[assetId] = resPath;
+    config.header[fieldName] = `/__orbitchat_assets/${assetId}?v=${Date.now()}`;
+  };
+
+  mapHeaderLogoAsset('logoUrl', 'header_logo');
+  mapHeaderLogoAsset('logoUrlLight', 'header_logo_light');
+  mapHeaderLogoAsset('logoUrlDark', 'header_logo_dark');
+  const faviconPath = resolveLocalAssetPath(config.application?.favicon, yamlPath);
+  if (faviconPath) {
+    localAssets.application_favicon = faviconPath;
+    config.application.favicon = `/__orbitchat_assets/application_favicon?v=${Date.now()}`;
+  }
+
+  const distPath = path.join(__dirname, '..', 'dist');
+  const app = createServer(distPath, config, {
+    ...serverConfig,
+    rateLimit: yamlObj?.guestLimits?.rateLimit,
+    trustProxy: yamlObj?.server?.trustProxy,
+    localAssets
+  });
+
+  const server = app.listen(serverConfig.port, serverConfig.host, () => {
+    console.debug(`🚀 ORBIT Chat is running at http://${serverConfig.host}:${serverConfig.port}`);
+    if (serverConfig.open) {
+      const url = `http://${serverConfig.host}:${serverConfig.port}`;
+      try {
+        // Use execFileSync to avoid shell injection — arguments are passed directly
+        execFileSync('open', [url], { stdio: 'ignore' });
+      } catch {
+        console.debug(`Open your browser at ${url}`);
+      }
+    }
+  });
+  // http-proxy may register multiple close listeners when routing across many adapters.
+  // Raise the listener cap to avoid noisy false-positive MaxListeners warnings.
+  if (typeof server.setMaxListeners === 'function') {
+    server.setMaxListeners(0);
+  }
+}
+
+const isMainModule = process.argv[1] && (import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/')) || path.basename(process.argv[1]) === 'orbitchat');
+if (isMainModule) main();
+export { main, createServer };

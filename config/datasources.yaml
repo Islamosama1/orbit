@@ -1,0 +1,170 @@
+datasources:
+  chroma:
+    use_local: true
+    db_path: "examples/chroma/chroma_db"
+    host: "localhost"
+    port: 8000
+  qdrant:
+    # Qdrant Cloud: set DATASOURCE_QDRANT_URL and DATASOURCE_QDRANT_API_KEY
+    # Self-hosted: set DATASOURCE_QDRANT_HOST and DATASOURCE_QDRANT_PORT
+    url: ${DATASOURCE_QDRANT_URL:-}
+    host: ${DATASOURCE_QDRANT_HOST:-localhost}
+    port: ${DATASOURCE_QDRANT_PORT:-6333}
+    api_key: ${DATASOURCE_QDRANT_API_KEY:-}
+    timeout: 5
+    prefer_grpc: false
+    https: false
+    collection_name: "orbit"
+  sqlite:
+    database: "examples/sqlite/sqlite_db"
+  postgres:
+    host: ${DATASOURCE_POSTGRES_HOST}
+    port: ${DATASOURCE_POSTGRES_PORT}
+    database: ${DATASOURCE_POSTGRES_DATABASE}
+    username: ${DATASOURCE_POSTGRES_USERNAME}
+    password: ${DATASOURCE_POSTGRES_PASSWORD}
+    sslmode: ${DATASOURCE_POSTGRES_SSL_MODE}
+    # Connection pool & timeout settings
+    use_connection_pool: true
+    pool_size: 10
+    min_pool_size: 2
+    connection_timeout: 5
+    idle_timeout: 300
+    max_connection_lifetime: 1800
+    statement_timeout: 10000
+    validate_on_borrow: true
+  supabase:
+    host: ${DATASOURCE_SUPABASE_HOST}
+    port: ${DATASOURCE_SUPABASE_PORT}
+    database: ${DATASOURCE_SUPABASE_DATABASE}
+    username: ${DATASOURCE_SUPABASE_USERNAME}
+    password: ${DATASOURCE_SUPABASE_PASSWORD}
+    sslmode: require
+    use_connection_pool: true
+    pool_size: 10
+    min_pool_size: 2
+    connection_timeout: 5
+    statement_timeout: 10000
+    validate_on_borrow: true
+  milvus:
+    host: "localhost"
+    port: 19530
+    dim: 768
+    metric_type: "IP"  # Options: L2, IP, COSINE
+  pinecone:
+    api_key: ${DATASOURCE_PINECONE_API_KEY}
+    # host: ${DATASOURCE_PINECONE_HOST}  # Only needed for pod-based indexes
+    namespace: ""  # Empty string for default namespace (where data was ingested)
+  elasticsearch:
+    node: ${DATASOURCE_ELASTICSEARCH_NODE}
+    verify_certs: true
+    timeout: 30
+    max_retries: 3
+    retry_on_timeout: true
+    http_compress: true
+    auth:
+      username: ${DATASOURCE_ELASTICSEARCH_USERNAME}
+      password: ${DATASOURCE_ELASTICSEARCH_PASSWORD}
+  redis:
+    host: ${DATASOURCE_REDIS_HOST}
+    port: ${DATASOURCE_REDIS_PORT}
+    password: ${DATASOURCE_REDIS_PASSWORD}
+    db: 0
+    use_ssl: false
+    vector_field: "embedding"
+    text_field: "content"
+    distance_metric: "COSINE"  # Options: L2, IP, COSINE
+  oracle:
+    host: ${DATASOURCE_ORACLE_HOST}
+    port: ${DATASOURCE_ORACLE_PORT}
+    service_name: ${DATASOURCE_ORACLE_SERVICE}
+    username: ${DATASOURCE_ORACLE_USERNAME}
+    password: ${DATASOURCE_ORACLE_PASSWORD}
+    use_connection_pool: true
+    pool_size: 10
+    min_pool_size: 2
+    connection_timeout: 5
+    statement_timeout: 10000
+    validate_on_borrow: true
+  mysql:
+    host: ${DATASOURCE_MYSQL_HOST}
+    port: ${DATASOURCE_MYSQL_PORT}
+    database: ${DATASOURCE_MYSQL_DATABASE}
+    username: ${DATASOURCE_MYSQL_USERNAME}
+    password: ${DATASOURCE_MYSQL_PASSWORD}
+    use_connection_pool: true
+    pool_size: 10
+    min_pool_size: 2
+    connection_timeout: 5
+    statement_timeout: 10000
+    validate_on_borrow: true
+  mariadb:
+    host: ${DATASOURCE_MARIADB_HOST}
+    port: ${DATASOURCE_MARIADB_PORT}
+    database: ${DATASOURCE_MARIADB_DATABASE}
+    username: ${DATASOURCE_MARIADB_USERNAME}
+    password: ${DATASOURCE_MARIADB_PASSWORD}
+    use_connection_pool: true
+    pool_size: 10
+    min_pool_size: 2
+    connection_timeout: 5
+    statement_timeout: 10000
+    validate_on_borrow: true
+  sqlserver:
+    host: ${DATASOURCE_SQLSERVER_HOST}
+    port: ${DATASOURCE_SQLSERVER_PORT}
+    database: ${DATASOURCE_SQLSERVER_DATABASE}
+    username: ${DATASOURCE_SQLSERVER_USERNAME}
+    password: ${DATASOURCE_SQLSERVER_PASSWORD}
+    driver: "ODBC Driver 18 for SQL Server"
+    use_connection_pool: true
+    pool_size: 10
+    min_pool_size: 2
+    connection_timeout: 5
+    statement_timeout: 10000
+  cassandra:
+    contact_points: ${DATASOURCE_CASSANDRA_HOSTS}
+    port: ${DATASOURCE_CASSANDRA_PORT}
+    keyspace: ${DATASOURCE_CASSANDRA_KEYSPACE}
+    username: ${DATASOURCE_CASSANDRA_USERNAME}
+    password: ${DATASOURCE_CASSANDRA_PASSWORD}
+  duckdb:
+    database: "examples/duckdb/analytics.duckdb"
+    read_only: true  # Allow concurrent reads from multiple processes
+    access_mode: "READ_ONLY"  # Multiple processes can read simultaneously
+    threads: null
+  athena:
+    # Athena requires an S3 output location for query results.
+    # Prefer dedicated Athena vars; if omitted, pyathena/boto3 default credential chain applies.
+    aws_access_key_id: ${DATASOURCE_ATHENA_ACCESS_KEY_ID:-}
+    aws_secret_access_key: ${DATASOURCE_ATHENA_SECRET_ACCESS_KEY:-}
+    aws_session_token: ${DATASOURCE_ATHENA_SESSION_TOKEN:-}
+    region_name: ${DATASOURCE_ATHENA_REGION:-us-east-1}
+    s3_staging_dir: ${DATASOURCE_ATHENA_S3_STAGING_DIR}
+    schema_name: ${DATASOURCE_ATHENA_SCHEMA:-default}
+    catalog_name: ${DATASOURCE_ATHENA_CATALOG:-AwsDataCatalog}
+    work_group: ${DATASOURCE_ATHENA_WORKGROUP:-primary}
+  mongodb:
+    # Option 1: MongoDB Atlas connection (recommended for sample_mflix)
+    connection_string: ${DATASOURCE_MONGODB_URI}
+    database: ${DATASOURCE_MONGODB_DATABASE}
+
+    # Option 2: Local MongoDB connection (fallback)
+    host: ${DATASOURCE_MONGODB_HOST}
+    port: ${DATASOURCE_MONGODB_PORT}
+    username: ${DATASOURCE_MONGODB_USERNAME}
+    password: ${DATASOURCE_MONGODB_PASSWORD}
+    auth_source: ${DATASOURCE_MONGODB_AUTH_SOURCE}
+
+    # Connection settings
+    timeout: 30
+    tls: ${DATASOURCE_MONGODB_TLS}
+    retry_writes: true
+    w: "majority"
+    max_pool_size: 50
+    min_pool_size: 5
+    wait_queue_timeout_ms: 5000
+    server_selection_timeout_ms: 5000
+
+    # Legacy settings (for existing orbit database)
+    apikey_collection: "api_keys"

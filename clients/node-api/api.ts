@@ -1,0 +1,2008 @@
+// For Node.js environments, we can use http.Agent for connection pooling
+let httpAgent: any = null;
+let httpsAgent: any = null;
+
+// Initialize agents for connection pooling in Node.js environments
+if (typeof window === 'undefined') {
+  // Lazy load to avoid including 'http' in browser bundles
+  Promise.all([
+    // @ts-expect-error - Dynamic import of Node.js built-in module (only available in Node.js runtime)
+    import('http').catch(() => null),
+    // @ts-expect-error - Dynamic import of Node.js built-in module (only available in Node.js runtime)
+    import('https').catch(() => null)
+  ]).then(([http, https]) => {
+    if (http?.default?.Agent) {
+      httpAgent = new http.default.Agent({ keepAlive: true });
+    } else if (http?.Agent) {
+      httpAgent = new http.Agent({ keepAlive: true });
+    }
+    
+    if (https?.default?.Agent) {
+      httpsAgent = new https.default.Agent({ keepAlive: true });
+    } else if (https?.Agent) {
+      httpsAgent = new https.Agent({ keepAlive: true });
+    }
+  }).catch(err => {
+    // Silently fail - connection pooling is optional
+    console.warn('Failed to initialize HTTP agents:', err.message);
+  });
+}
+
+// Define the StreamResponse interface
+export interface StreamResponse {
+  text: string;
+  done: boolean;
+  request_id?: string;  // Request ID from first chunk for cancellation
+  audio?: string;  // Optional base64-encoded audio data (TTS response) - full audio
+  audioFormat?: string;  // Audio format (mp3, wav, etc.)
+  audio_chunk?: string;  // Optional streaming audio chunk (base64-encoded)
+  chunk_index?: number;  // Index of the audio chunk for ordering
+  threading?: {  // Optional threading metadata
+    supports_threading: boolean;
+    message_id: string;
+    session_id: string;
+  };
+}
+
+// The server now returns this directly for non-streaming chat
+export interface ChatResponse {
+  response: string;
+  sources?: any[];
+  audio?: string;  // Optional base64-encoded audio data (TTS response)
+  audio_format?: string;  // Audio format (mp3, wav, etc.)
+}
+
+// Thread-related interfaces
+export interface ThreadInfo {
+  thread_id: string;
+  thread_session_id: string;
+  parent_message_id: string;
+  parent_session_id: string;
+  adapter_name: string;
+  created_at: string;
+  expires_at: string;
+}
+
+// The request body for the /v1/chat endpoint
+interface ChatRequest {
+  messages: Array<{ role: string; content: string; }>;
+  stream: boolean;
+  file_ids?: string[];  // Optional list of file IDs for file context
+  thread_id?: string;  // Optional thread ID for follow-up questions
+  audio_input?: string;  // Optional base64-encoded audio data for STT
+  audio_format?: string;  // Optional audio format (mp3, wav, etc.)
+  language?: string;  // Optional language code for STT (e.g., "en-US")
+  return_audio?: boolean;  // Whether to return audio response (TTS)
+  tts_voice?: string;  // Voice for TTS (e.g., "alloy", "echo" for OpenAI)
+  source_language?: string;  // Source language for translation
+  target_language?: string;  // Target language for translation
+}
+
+// File-related interfaces
+export interface FileUploadResponse {
+  file_id: string;
+  filename: string;
+  mime_type: string;
+  file_size: number;
+  status: string;
+  chunk_count: number;
+  message: string;
+}
+
+export interface FileInfo {
+  file_id: string;
+  filename: string;
+  mime_type: string;
+  file_size: number;
+  upload_timestamp: string;
+  processing_status: string;
+  chunk_count: number;
+  storage_type: string;
+}
+
+export interface FileQueryRequest {
+  query: string;
+  max_results?: number;
+}
+
+export interface FileQueryResponse {
+  file_id: string;
+  filename: string;
+  results: Array<{
+    content: string;
+    metadata: {
+      chunk_id: string;
+      file_id: string;
+      chunk_index: number;
+      confidence: number;
+    };
+  }>;
+}
+
+// API key status interface
+export interface ApiKeyStatus {
+  exists: boolean;
+  active: boolean;
+  adapter_name?: string | null;
+  client_name?: string | null;
+  created_at?: string | number | null;
+  system_prompt?: {
+    id: string;
+    exists: boolean;
+  } | null;
+  message?: string;
+}
+
+// Adapter information interface
+export interface AdapterInfo {
+  client_name: string;
+  adapter_name: string;
+  model: string | null;
+  isFileSupported?: boolean;
+  notes?: string | null;
+}
+
+export interface ConversationHistoryMessage {
+  message_id?: string | null;
+  role: string;
+  content: string;
+  timestamp: string | number | Date | null;
+  metadata?: Record<string, any>;
+}
+
+export interface ConversationHistoryResponse {
+  session_id: string;
+  messages: ConversationHistoryMessage[];
+  count: number;
+}
+
+// Autocomplete interfaces
+export interface AutocompleteSuggestion {
+  text: string;
+}
+
+export interface AutocompleteResponse {
+  suggestions: AutocompleteSuggestion[];
+  query: string;
+}
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  role: string;
+  active?: boolean;
+  created_at?: string | null;
+  last_login?: string | null;
+}
+
+export interface AuthLoginResponse {
+  token: string;
+  user: AuthUser;
+}
+
+export interface ApiKeyQuotaConfig {
+  daily_limit?: number | null;
+  monthly_limit?: number | null;
+  throttle_enabled?: boolean;
+  throttle_priority?: number;
+}
+
+export interface ApiKeyQuotaUsage {
+  daily_used: number;
+  monthly_used: number;
+  daily_reset_at: number;
+  monthly_reset_at: number;
+  last_request_at?: number | null;
+}
+
+export interface ApiKeyQuotaDetails {
+  api_key_masked: string;
+  quota: ApiKeyQuotaConfig;
+  usage: ApiKeyQuotaUsage;
+  daily_remaining?: number | null;
+  monthly_remaining?: number | null;
+  throttle_delay_ms?: number;
+}
+
+interface ApiClientConfig {
+  apiUrl: string;
+  apiKey?: string | null;
+  sessionId?: string | null;
+  adapterName?: string | null;
+  useMiddleware?: boolean;
+  middlewareBaseUrl?: string | null;
+}
+
+const NETWORK_ERROR_MESSAGE = 'Could not connect to the server. Please check if the server is running.';
+const CHAT_TIMEOUT_MS = 60000;
+const STREAM_BUFFER_MAX_LENGTH = 1000000;
+const STREAM_BUFFER_TRIMMED_LENGTH = 500000;
+
+export class ApiClient {
+  private readonly apiUrl: string;
+  private readonly apiKey: string | null;
+  private readonly adapterName: string | null;
+  private readonly middlewareBaseUrl: string;
+  private readonly middlewareMode: boolean;
+  private sessionId: string | null; // Session ID can be mutable
+
+  constructor(config: ApiClientConfig) {
+    if (!config.apiUrl || typeof config.apiUrl !== 'string') {
+      throw new Error('API URL must be a valid string');
+    }
+    if (config.apiKey !== undefined && config.apiKey !== null && typeof config.apiKey !== 'string') {
+      throw new Error('API key must be a valid string or null');
+    }
+    if (config.sessionId !== undefined && config.sessionId !== null && typeof config.sessionId !== 'string') {
+      throw new Error('Session ID must be a valid string or null');
+    }
+    if (config.adapterName !== undefined && config.adapterName !== null && typeof config.adapterName !== 'string') {
+      throw new Error('Adapter name must be a valid string or null');
+    }
+    if (config.middlewareBaseUrl !== undefined && config.middlewareBaseUrl !== null && typeof config.middlewareBaseUrl !== 'string') {
+      throw new Error('Middleware base URL must be a valid string or null');
+    }
+    
+    this.apiUrl = config.apiUrl;
+    this.apiKey = config.apiKey ?? null;
+    this.sessionId = config.sessionId ?? null;
+    const adapter = typeof config.adapterName === 'string' ? config.adapterName.trim() : '';
+    this.adapterName = adapter && adapter.length > 0 ? adapter : null;
+    const baseUrl = typeof config.middlewareBaseUrl === 'string' ? config.middlewareBaseUrl.trim() : '';
+    this.middlewareBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+    const middlewareRequested = config.useMiddleware ?? (!this.apiKey && !!this.adapterName);
+    this.middlewareMode = Boolean(this.adapterName && middlewareRequested);
+  }
+
+  public setSessionId(sessionId: string | null): void {
+    if (sessionId !== null && typeof sessionId !== 'string') {
+      throw new Error('Session ID must be a valid string or null');
+    }
+    this.sessionId = sessionId;
+  }
+
+  public getSessionId(): string | null {
+    return this.sessionId;
+  }
+
+  private withBearerAuth(headers: Record<string, string> = {}, authToken?: string): Record<string, string> {
+    if (authToken && authToken.trim().length > 0) {
+      return {
+        ...headers,
+        Authorization: `Bearer ${authToken.trim()}`
+      };
+    }
+    return headers;
+  }
+
+  private hasFailedToFetch(error: any): boolean {
+    return error?.name === 'TypeError' && error?.message?.includes('Failed to fetch');
+  }
+
+  private rethrowNetworkError(error: any): void {
+    if (this.hasFailedToFetch(error)) {
+      throw new Error(NETWORK_ERROR_MESSAGE);
+    }
+  }
+
+  private async fetchWithNetworkErrorHandling(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    try {
+      return await fetch(input, init);
+    } catch (error: any) {
+      this.rethrowNetworkError(error);
+      throw error;
+    }
+  }
+
+  private async requestJsonOrThrow<T>(
+    url: string,
+    options: RequestInit,
+    errorPrefix: string
+  ): Promise<T> {
+    try {
+      const response = await fetch(url, {
+        ...this.getFetchOptions(options)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`${errorPrefix}: ${response.status} ${errorText}`);
+      }
+
+      return await response.json() as T;
+    } catch (error: any) {
+      this.rethrowNetworkError(error);
+      throw error;
+    }
+  }
+
+  private getRequiredApiKey(errorMessage: string): string {
+    if (!this.apiKey) {
+      throw new Error(errorMessage);
+    }
+    return this.apiKey;
+  }
+
+  /**
+   * Validate that the API key exists and is active.
+   *
+   * @returns Promise resolving to API key status information
+   * @throws Error if API key is not provided, invalid, inactive, or validation fails
+   */
+  public async validateApiKey(): Promise<ApiKeyStatus> {
+    const apiKey = this.getRequiredApiKey('API key is required for validation');
+
+    try {
+      const response = await this.fetchWithNetworkErrorHandling(`${this.apiUrl}/admin/api-keys/${apiKey}/status`, {
+        ...this.getFetchOptions({
+          method: 'GET'
+        })
+      });
+
+      if (!response.ok) {
+        // Read error response body
+        let errorText = '';
+        try {
+          errorText = await response.text();
+        } catch {
+          // If we can't read the body, fall back to status code
+          errorText = `HTTP ${response.status}`;
+        }
+
+        let errorDetail: string;
+        let friendlyMessage: string;
+
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorDetail = errorJson.detail || errorJson.message || errorText;
+        } catch {
+          // If parsing fails, use the error text or status code
+          errorDetail = errorText || `HTTP ${response.status}`;
+        }
+
+        // Generate user-friendly error messages based on HTTP status code
+        switch (response.status) {
+          case 401:
+            friendlyMessage = 'API key is invalid or expired';
+            break;
+          case 403:
+            friendlyMessage = 'Access denied: API key does not have required permissions';
+            break;
+          case 404:
+            friendlyMessage = 'API key not found';
+            break;
+          case 503:
+            friendlyMessage = 'API key management is not available in inference-only mode';
+            break;
+          default:
+            friendlyMessage = `Failed to validate API key: ${errorDetail}`;
+            break;
+        }
+
+        // Throw error - will be logged in catch block to avoid duplicates
+        throw new Error(friendlyMessage);
+      }
+
+      const status: ApiKeyStatus = await response.json();
+
+      // Check if the key exists
+      if (!status.exists) {
+        const friendlyMessage = 'API key does not exist';
+        // Throw error - will be logged in catch block to avoid duplicates
+        throw new Error(friendlyMessage);
+      }
+
+      // Check if the key is active
+      if (!status.active) {
+        const friendlyMessage = 'API key is inactive';
+        // Throw error - will be logged in catch block to avoid duplicates
+        throw new Error(friendlyMessage);
+      }
+
+      return status;
+    } catch (error: any) {
+      // Extract user-friendly error message
+      let friendlyMessage: string;
+
+      if (error instanceof Error && error.message) {
+        // If it's already a user-friendly Error from above, use it directly
+        if (error.message.includes('API key') ||
+            error.message.includes('Access denied') ||
+            error.message.includes('invalid') ||
+            error.message.includes('expired') ||
+            error.message.includes('inactive') ||
+            error.message.includes('not found') ||
+            error.message.includes('Could not connect')) {
+          friendlyMessage = error.message;
+        } else {
+          friendlyMessage = `API key validation failed: ${error.message}`;
+        }
+      } else if (this.hasFailedToFetch(error)) {
+        friendlyMessage = NETWORK_ERROR_MESSAGE;
+      } else {
+        friendlyMessage = 'API key validation failed. Please check your API key and try again.';
+      }
+
+      // Only log warning if it's not a network error (those are already logged by browser)
+      // For validation errors, we log once with a friendly message
+      // Note: Browser will still log HTTP errors (401, 404, etc.) - this is unavoidable
+      console.warn(`[ApiClient] ${friendlyMessage}`);
+
+      // Throw the friendly error message
+      throw new Error(friendlyMessage);
+    }
+  }
+
+  /**
+   * Get adapter information for the current API key.
+   *
+   * Returns information about the adapter and model being used by the API key.
+   * This is useful for displaying configuration details to users.
+   *
+   * @returns Promise resolving to adapter information
+   * @throws Error if API key is not provided, invalid, disabled, or request fails
+   */
+  public async getAdapterInfo(): Promise<AdapterInfo> {
+    this.getRequiredApiKey('API key is required to get adapter information');
+
+    try {
+      const response = await this.fetchWithNetworkErrorHandling(`${this.apiUrl}/admin/adapters/info`, {
+        ...this.getFetchOptions({
+          method: 'GET'
+        })
+      });
+
+      if (!response.ok) {
+        // Read error response body
+        let errorText = '';
+        try {
+          errorText = await response.text();
+        } catch {
+          // If we can't read the body, fall back to status code
+          errorText = `HTTP ${response.status}`;
+        }
+
+        let errorDetail: string;
+        let friendlyMessage: string;
+
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorDetail = errorJson.detail || errorJson.message || errorText;
+        } catch {
+          // If parsing fails, use the error text or status code
+          errorDetail = errorText || `HTTP ${response.status}`;
+        }
+
+        // Generate user-friendly error messages based on HTTP status code
+        switch (response.status) {
+          case 401:
+            friendlyMessage = 'API key is invalid, disabled, or has no associated adapter';
+            break;
+          case 404:
+            friendlyMessage = 'Adapter configuration not found';
+            break;
+          case 503:
+            friendlyMessage = 'Service is not available';
+            break;
+          default:
+            friendlyMessage = `Failed to get adapter info: ${errorDetail}`;
+            break;
+        }
+
+        // Throw error - will be logged in catch block to avoid duplicates
+        throw new Error(friendlyMessage);
+      }
+
+      const adapterInfo: AdapterInfo = await response.json();
+      return adapterInfo;
+    } catch (error: any) {
+      // Extract user-friendly error message
+      let friendlyMessage: string;
+
+      if (error instanceof Error && error.message) {
+        // If it's already a user-friendly Error from above, use it directly
+        if (error.message.includes('API key') ||
+            error.message.includes('Adapter') ||
+            error.message.includes('invalid') ||
+            error.message.includes('disabled') ||
+            error.message.includes('not found') ||
+            error.message.includes('Could not connect')) {
+          friendlyMessage = error.message;
+        } else {
+          friendlyMessage = `Failed to get adapter info: ${error.message}`;
+        }
+      } else if (this.hasFailedToFetch(error)) {
+        friendlyMessage = NETWORK_ERROR_MESSAGE;
+      } else {
+        friendlyMessage = 'Failed to get adapter information. Please try again.';
+      }
+
+      console.warn(`[ApiClient] ${friendlyMessage}`);
+
+      // Throw the friendly error message
+      throw new Error(friendlyMessage);
+    }
+  }
+
+  /**
+   * Get autocomplete suggestions based on query prefix.
+   *
+   * Returns query suggestions based on nl_examples from intent adapter templates.
+   * This is useful for helping users discover available queries.
+   *
+   * @param query - The query prefix (minimum 3 characters)
+   * @param limit - Maximum number of suggestions (default: 5)
+   * @returns Promise resolving to autocomplete suggestions
+   */
+  public async getAutocompleteSuggestions(
+    query: string,
+    limit: number = 5
+  ): Promise<AutocompleteResponse> {
+    if (query.length < 3) {
+      return { suggestions: [], query };
+    }
+
+    const useMiddleware = this.middlewareMode && !!this.adapterName;
+
+    if (!useMiddleware && !this.apiKey) {
+      return { suggestions: [], query };
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.set('q', query);
+      params.set('limit', String(limit));
+
+      let requestUrl: string;
+      let requestOptions: RequestInit;
+
+      if (useMiddleware) {
+        if (!this.middlewareBaseUrl && typeof window === 'undefined') {
+          throw new Error('middlewareBaseUrl must be set when using middleware outside the browser environment.');
+        }
+
+        const base = this.middlewareBaseUrl
+          ? this.middlewareBaseUrl
+          : '';
+        const endpoint = '/api/v1/autocomplete';
+        requestUrl = `${base}${endpoint}?${params.toString()}`;
+
+        const headers: Record<string, string> = {
+          'X-Adapter-Name': this.adapterName as string,
+          'X-Request-ID': Date.now().toString(36) + Math.random().toString(36).substring(2),
+        };
+
+        if (this.sessionId) {
+          headers['X-Session-ID'] = this.sessionId;
+        }
+
+        requestOptions = {
+          method: 'GET',
+          headers
+        };
+      } else {
+        const url = new URL(`${this.apiUrl}/v1/autocomplete`);
+        url.searchParams.set('q', query);
+        url.searchParams.set('limit', String(limit));
+        requestUrl = url.toString();
+
+        requestOptions = {
+          ...this.getFetchOptions({
+            method: 'GET'
+          })
+        };
+      }
+
+      const response = await fetch(requestUrl, requestOptions);
+
+      if (!response.ok) {
+        // Non-critical - return empty suggestions rather than throw
+        console.warn('[ApiClient] Autocomplete request failed:', response.status);
+        return { suggestions: [], query };
+      }
+
+      return await response.json();
+    } catch (error: any) {
+      // Autocomplete failures should not block the user
+      console.warn('[ApiClient] Autocomplete error:', error.message);
+      return { suggestions: [], query };
+    }
+  }
+
+  // Auth endpoints
+  public async login(username: string, password: string): Promise<AuthLoginResponse> {
+    return await this.requestJsonOrThrow<AuthLoginResponse>(
+      `${this.apiUrl}/auth/login`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      },
+      'Login failed'
+    );
+  }
+
+  public async logout(authToken?: string): Promise<{ message: string }> {
+    return await this.requestJsonOrThrow<{ message: string }>(
+      `${this.apiUrl}/auth/logout`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Logout failed'
+    );
+  }
+
+  public async getCurrentUser(authToken?: string): Promise<AuthUser> {
+    return await this.requestJsonOrThrow<AuthUser>(
+      `${this.apiUrl}/auth/me`,
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to fetch current user'
+    );
+  }
+
+  public async registerUser(
+    payload: { username: string; password: string; role?: string },
+    authToken?: string
+  ): Promise<{ id: string; username: string; role: string }> {
+    return await this.requestJsonOrThrow<{ id: string; username: string; role: string }>(
+      `${this.apiUrl}/auth/register`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify({
+          username: payload.username,
+          password: payload.password,
+          role: payload.role ?? 'user'
+        })
+      },
+      'Failed to register user'
+    );
+  }
+
+  public async listUsers(
+    params: { role?: string; active_only?: boolean; limit?: number; offset?: number } = {},
+    authToken?: string
+  ): Promise<AuthUser[]> {
+    const url = new URL(`${this.apiUrl}/auth/users`);
+    if (params.role) url.searchParams.set('role', params.role);
+    if (typeof params.active_only === 'boolean') url.searchParams.set('active_only', String(params.active_only));
+    if (typeof params.limit === 'number') url.searchParams.set('limit', String(params.limit));
+    if (typeof params.offset === 'number') url.searchParams.set('offset', String(params.offset));
+
+    return await this.requestJsonOrThrow<AuthUser[]>(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to list users'
+    );
+  }
+
+  public async getUserByUsername(username: string, authToken?: string): Promise<AuthUser> {
+    const url = new URL(`${this.apiUrl}/auth/users/by-username`);
+    url.searchParams.set('username', username);
+    return await this.requestJsonOrThrow<AuthUser>(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to get user by username'
+    );
+  }
+
+  public async deleteUser(userId: string, authToken?: string): Promise<{ message: string; user_id: string }> {
+    return await this.requestJsonOrThrow<{ message: string; user_id: string }>(
+      `${this.apiUrl}/auth/users/${userId}`,
+      {
+        method: 'DELETE',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to delete user'
+    );
+  }
+
+  public async changePassword(
+    currentPassword: string,
+    newPassword: string,
+    authToken?: string
+  ): Promise<{ message: string }> {
+    return await this.requestJsonOrThrow<{ message: string }>(
+      `${this.apiUrl}/auth/change-password`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+      },
+      'Failed to change password'
+    );
+  }
+
+  public async resetUserPassword(
+    userId: string,
+    newPassword: string,
+    authToken?: string
+  ): Promise<{ message: string; user_id: string }> {
+    return await this.requestJsonOrThrow<{ message: string; user_id: string }>(
+      `${this.apiUrl}/auth/reset-password`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify({ user_id: userId, new_password: newPassword })
+      },
+      'Failed to reset user password'
+    );
+  }
+
+  public async deactivateUser(userId: string, authToken?: string): Promise<{ message: string; user_id: string }> {
+    return await this.requestJsonOrThrow<{ message: string; user_id: string }>(
+      `${this.apiUrl}/auth/users/${userId}/deactivate`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to deactivate user'
+    );
+  }
+
+  public async activateUser(userId: string, authToken?: string): Promise<{ message: string; user_id: string }> {
+    return await this.requestJsonOrThrow<{ message: string; user_id: string }>(
+      `${this.apiUrl}/auth/users/${userId}/activate`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to activate user'
+    );
+  }
+
+  // Admin endpoints
+  public async createApiKey(
+    payload: { client_name: string; notes?: string; system_prompt_id?: string; adapter_name?: string },
+    authToken?: string
+  ): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/api-keys`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify(payload)
+      },
+      'Failed to create API key'
+    );
+  }
+
+  public async listApiKeys(
+    params: { collection?: string; adapter?: string; active_only?: boolean; limit?: number; offset?: number } = {},
+    authToken?: string
+  ): Promise<any[]> {
+    const url = new URL(`${this.apiUrl}/admin/api-keys`);
+    if (params.collection) url.searchParams.set('collection', params.collection);
+    if (params.adapter) url.searchParams.set('adapter', params.adapter);
+    if (typeof params.active_only === 'boolean') url.searchParams.set('active_only', String(params.active_only));
+    if (typeof params.limit === 'number') url.searchParams.set('limit', String(params.limit));
+    if (typeof params.offset === 'number') url.searchParams.set('offset', String(params.offset));
+
+    return await this.requestJsonOrThrow<any[]>(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to list API keys'
+    );
+  }
+
+  public async getApiKeyStatusByValue(apiKey: string, authToken?: string): Promise<ApiKeyStatus> {
+    return await this.requestJsonOrThrow<ApiKeyStatus>(
+      `${this.apiUrl}/admin/api-keys/${apiKey}/status`,
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to get API key status'
+    );
+  }
+
+  public async renameApiKey(oldApiKey: string, newApiKey: string, authToken?: string): Promise<any> {
+    const url = new URL(`${this.apiUrl}/admin/api-keys/${oldApiKey}/rename`);
+    url.searchParams.set('new_api_key', newApiKey);
+    return await this.requestJsonOrThrow<any>(
+      url.toString(),
+      {
+        method: 'PATCH',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to rename API key'
+    );
+  }
+
+  public async deactivateApiKey(apiKey: string, authToken?: string): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/api-keys/deactivate`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify({ api_key: apiKey })
+      },
+      'Failed to deactivate API key'
+    );
+  }
+
+  public async deleteApiKey(apiKey: string, authToken?: string): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/api-keys/${apiKey}`,
+      {
+        method: 'DELETE',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to delete API key'
+    );
+  }
+
+  public async getAdapterInfoFromApiKeyHeader(): Promise<AdapterInfo> {
+    this.getRequiredApiKey('API key is required to get adapter information');
+
+    return await this.requestJsonOrThrow<AdapterInfo>(
+      `${this.apiUrl}/admin/api-keys/info`,
+      {
+        method: 'GET'
+      },
+      'Failed to get adapter info'
+    );
+  }
+
+  public async associatePromptWithApiKey(apiKey: string, promptId: string, authToken?: string): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/api-keys/${apiKey}/prompt`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify({ prompt_id: promptId })
+      },
+      'Failed to associate prompt with API key'
+    );
+  }
+
+  public async getApiKeyQuota(apiKey: string, authToken?: string): Promise<ApiKeyQuotaDetails> {
+    return await this.requestJsonOrThrow<ApiKeyQuotaDetails>(
+      `${this.apiUrl}/admin/api-keys/${apiKey}/quota`,
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to get API key quota'
+    );
+  }
+
+  public async updateApiKeyQuota(apiKey: string, quota: ApiKeyQuotaConfig, authToken?: string): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/api-keys/${apiKey}/quota`,
+      {
+        method: 'PUT',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify(quota)
+      },
+      'Failed to update API key quota'
+    );
+  }
+
+  public async resetApiKeyQuota(apiKey: string, period: 'daily' | 'monthly' | 'all' = 'daily', authToken?: string): Promise<any> {
+    const url = new URL(`${this.apiUrl}/admin/api-keys/${apiKey}/quota/reset`);
+    url.searchParams.set('period', period);
+    return await this.requestJsonOrThrow<any>(
+      url.toString(),
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to reset API key quota'
+    );
+  }
+
+  public async getQuotaUsageReport(
+    period: 'daily' | 'monthly' = 'daily',
+    limit: number = 100,
+    authToken?: string
+  ): Promise<any> {
+    const url = new URL(`${this.apiUrl}/admin/quotas/usage-report`);
+    url.searchParams.set('period', period);
+    url.searchParams.set('limit', String(limit));
+    return await this.requestJsonOrThrow<any>(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to get quota usage report'
+    );
+  }
+
+  public async createPrompt(
+    payload: { name: string; prompt: string; version?: string },
+    authToken?: string
+  ): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/prompts`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify(payload)
+      },
+      'Failed to create prompt'
+    );
+  }
+
+  public async listPrompts(
+    params: { name_filter?: string; limit?: number; offset?: number } = {},
+    authToken?: string
+  ): Promise<any[]> {
+    const url = new URL(`${this.apiUrl}/admin/prompts`);
+    if (params.name_filter) url.searchParams.set('name_filter', params.name_filter);
+    if (typeof params.limit === 'number') url.searchParams.set('limit', String(params.limit));
+    if (typeof params.offset === 'number') url.searchParams.set('offset', String(params.offset));
+
+    return await this.requestJsonOrThrow<any[]>(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to list prompts'
+    );
+  }
+
+  public async getPrompt(promptId: string, authToken?: string): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/prompts/${promptId}`,
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to get prompt'
+    );
+  }
+
+  public async updatePrompt(
+    promptId: string,
+    payload: { prompt: string; version?: string },
+    authToken?: string
+  ): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/prompts/${promptId}`,
+      {
+        method: 'PUT',
+        headers: this.withBearerAuth({ 'Content-Type': 'application/json' }, authToken),
+        body: JSON.stringify(payload)
+      },
+      'Failed to update prompt'
+    );
+  }
+
+  public async deletePrompt(promptId: string, authToken?: string): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/admin/prompts/${promptId}`,
+      {
+        method: 'DELETE',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to delete prompt'
+    );
+  }
+
+  public async reloadAdapters(adapterName?: string, authToken?: string): Promise<any> {
+    const url = new URL(`${this.apiUrl}/admin/reload-adapters`);
+    if (adapterName) url.searchParams.set('adapter_name', adapterName);
+    return await this.requestJsonOrThrow<any>(
+      url.toString(),
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to reload adapters'
+    );
+  }
+
+  public async reloadTemplates(adapterName?: string, authToken?: string): Promise<any> {
+    const url = new URL(`${this.apiUrl}/admin/reload-templates`);
+    if (adapterName) url.searchParams.set('adapter_name', adapterName);
+    return await this.requestJsonOrThrow<any>(
+      url.toString(),
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to reload templates'
+    );
+  }
+
+  public async getServerInfo(authToken?: string): Promise<{ pid: number; version: string; status: string }> {
+    return await this.requestJsonOrThrow<{ pid: number; version: string; status: string }>(
+      `${this.apiUrl}/admin/info`,
+      {
+        method: 'GET',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to get server info'
+    );
+  }
+
+  public async shutdownServer(authToken?: string): Promise<{ status: string; message: string; timestamp: string }> {
+    return await this.requestJsonOrThrow<{ status: string; message: string; timestamp: string }>(
+      `${this.apiUrl}/admin/shutdown`,
+      {
+        method: 'POST',
+        headers: this.withBearerAuth({}, authToken)
+      },
+      'Failed to shutdown server'
+    );
+  }
+
+  // Health endpoints
+  public async getHealth(): Promise<{ status: string }> {
+    return await this.requestJsonOrThrow<{ status: string }>(
+      `${this.apiUrl}/health/`,
+      {
+        method: 'GET'
+      },
+      'Failed to get health status'
+    );
+  }
+
+  public async getHealthAdapters(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/adapters`,
+      {
+        method: 'GET'
+      },
+      'Failed to get adapter health'
+    );
+  }
+
+  public async resetAdapterCircuit(adapterName: string): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/adapters/${adapterName}/reset`,
+      {
+        method: 'POST'
+      },
+      'Failed to reset adapter circuit'
+    );
+  }
+
+  public async getEmbeddingServiceStats(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/embedding-services`,
+      {
+        method: 'GET'
+      },
+      'Failed to get embedding service stats'
+    );
+  }
+
+  public async getMongoDbServiceStats(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/mongodb-services`,
+      {
+        method: 'GET'
+      },
+      'Failed to get MongoDB service stats'
+    );
+  }
+
+  public async getReadiness(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/ready`,
+      {
+        method: 'GET'
+      },
+      'Failed to get readiness status'
+    );
+  }
+
+  public async getSystemStatus(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/system`,
+      {
+        method: 'GET'
+      },
+      'Failed to get system status'
+    );
+  }
+
+  public async getAdapterHistory(adapterName: string, full: boolean = false): Promise<any> {
+    const suffix = full ? '/history/full' : '/history';
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/adapters/${adapterName}${suffix}`,
+      {
+        method: 'GET'
+      },
+      'Failed to get adapter history'
+    );
+  }
+
+  public async getThreadPoolStats(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/thread-pools`,
+      {
+        method: 'GET'
+      },
+      'Failed to get thread pool stats'
+    );
+  }
+
+  public async logThreadPoolStatus(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/health/thread-pools/log-status`,
+      {
+        method: 'POST'
+      },
+      'Failed to log thread pool status'
+    );
+  }
+
+  // Voice and dashboard endpoints
+  public async getVoiceStatus(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/voice/status`,
+      {
+        method: 'GET'
+      },
+      'Failed to get voice status'
+    );
+  }
+
+  public getVoiceWebSocketUrl(
+    adapterName: string,
+    options: { sessionId?: string; userId?: string; apiKey?: string } = {}
+  ): string {
+    const base = this.apiUrl.replace(/^http/i, 'ws');
+    const url = new URL(`${base}/ws/voice/${adapterName}`);
+    const sessionId = options.sessionId ?? this.sessionId ?? undefined;
+    const apiKey = options.apiKey ?? this.apiKey ?? undefined;
+
+    if (sessionId) url.searchParams.set('session_id', sessionId);
+    if (options.userId) url.searchParams.set('user_id', options.userId);
+    if (apiKey) url.searchParams.set('api_key', apiKey);
+    return url.toString();
+  }
+
+  public async getPrometheusMetrics(): Promise<string> {
+    const response = await this.fetchWithNetworkErrorHandling(`${this.apiUrl}/metrics`, this.getFetchOptions({ method: 'GET' }));
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to fetch Prometheus metrics: ${response.status} ${errorText}`);
+    }
+    return await response.text();
+  }
+
+  public async getMetricsJson(): Promise<any> {
+    return await this.requestJsonOrThrow<any>(
+      `${this.apiUrl}/metrics/json`,
+      {
+        method: 'GET'
+      },
+      'Failed to get dashboard metrics'
+    );
+  }
+
+  public async getDashboardHtml(username: string, password: string): Promise<string> {
+    if (typeof btoa !== 'function') {
+      throw new Error('Base64 encoding is not available in this runtime');
+    }
+    const credentials = btoa(`${username}:${password}`);
+    const response = await this.fetchWithNetworkErrorHandling(
+      `${this.apiUrl}/dashboard`,
+      this.getFetchOptions({
+        method: 'GET',
+        headers: { Authorization: `Basic ${credentials}` }
+      })
+    );
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to fetch dashboard HTML: ${response.status} ${errorText}`);
+    }
+    return await response.text();
+  }
+
+  public getMetricsWebSocketUrl(): string {
+    return `${this.apiUrl.replace(/^http/i, 'ws')}/ws/metrics`;
+  }
+
+  // Helper to get fetch options with connection pooling if available
+  private getFetchOptions(options: RequestInit = {}): RequestInit {
+    const baseOptions: RequestInit = {};
+    
+    // Environment-specific options
+    if (typeof window === 'undefined') {
+      // Node.js: Use connection pooling agent
+      const isHttps = this.apiUrl.startsWith('https:');
+      const agent = isHttps ? httpsAgent : httpAgent;
+      if (agent) {
+        (baseOptions as any).agent = agent;
+      }
+    } else {
+      // Browser: Use keep-alive header
+      baseOptions.headers = { 'Connection': 'keep-alive' };
+    }
+
+    // Common headers
+    const headers: Record<string, string> = {
+      'X-Request-ID': Date.now().toString(36) + Math.random().toString(36).substring(2),
+    };
+
+    // Merge base options headers (for browser keep-alive)
+    if (baseOptions.headers) {
+      Object.assign(headers, baseOptions.headers);
+    }
+
+    // Merge original request headers (but don't overwrite API key)
+    if (options.headers) {
+      const incomingHeaders = options.headers as Record<string, string>;
+      for (const [key, value] of Object.entries(incomingHeaders)) {
+        // Don't overwrite X-API-Key if we have one
+        if (key.toLowerCase() !== 'x-api-key' || !this.apiKey) {
+          headers[key] = value;
+        }
+      }
+    }
+
+    if (this.apiKey) {
+      headers['X-API-Key'] = this.apiKey;
+    }
+
+    if (this.sessionId) {
+      headers['X-Session-ID'] = this.sessionId;
+    }
+
+    return {
+      ...options,
+      ...baseOptions,
+      headers,
+    };
+  }
+
+  // Create Chat request
+  private createChatRequest(
+    message: string, 
+    stream: boolean = true, 
+    fileIds?: string[],
+    threadId?: string,
+    audioInput?: string,
+    audioFormat?: string,
+    language?: string,
+    returnAudio?: boolean,
+    ttsVoice?: string,
+    sourceLanguage?: string,
+    targetLanguage?: string
+  ): ChatRequest {
+    const request: ChatRequest = {
+      messages: [
+        { role: "user", content: message }
+      ],
+      stream
+    };
+    if (fileIds && fileIds.length > 0) {
+      request.file_ids = fileIds;
+    }
+    if (threadId) {
+      request.thread_id = threadId;
+    }
+    if (audioInput) {
+      request.audio_input = audioInput;
+    }
+    if (audioFormat) {
+      request.audio_format = audioFormat;
+    }
+    if (language) {
+      request.language = language;
+    }
+    if (returnAudio !== undefined) {
+      request.return_audio = returnAudio;
+    }
+    if (ttsVoice) {
+      request.tts_voice = ttsVoice;
+    }
+    if (sourceLanguage) {
+      request.source_language = sourceLanguage;
+    }
+    if (targetLanguage) {
+      request.target_language = targetLanguage;
+    }
+    return request;
+  }
+
+  public async *streamChat(
+    message: string,
+    stream: boolean = true,
+    fileIds?: string[],
+    threadId?: string,
+    audioInput?: string,
+    audioFormat?: string,
+    language?: string,
+    returnAudio?: boolean,
+    ttsVoice?: string,
+    sourceLanguage?: string,
+    targetLanguage?: string,
+    abortSignal?: AbortSignal
+  ): AsyncGenerator<StreamResponse> {
+    try {
+      // Add timeout to the fetch request
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS); // 60 second timeout
+
+      // Link external abort signal to internal controller
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => controller.abort());
+      }
+
+      const response = await fetch(`${this.apiUrl}/v1/chat`, {
+        ...this.getFetchOptions({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': stream ? 'text/event-stream' : 'application/json'
+          },
+          body: JSON.stringify(this.createChatRequest(
+            message, 
+            stream, 
+            fileIds,
+            threadId,
+            audioInput,
+            audioFormat,
+            language,
+            returnAudio,
+            ttsVoice,
+            sourceLanguage,
+            targetLanguage
+          )),
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Network response was not ok: ${response.status} ${errorText}`);
+      }
+
+      if (!stream) {
+        // Handle non-streaming response
+        const data = await response.json() as ChatResponse;
+        if (data.response) {
+          yield {
+            text: data.response,
+            done: true,
+            audio: data.audio,
+            audioFormat: data.audio_format
+          } as StreamResponse & { audio?: string; audioFormat?: string };
+        }
+        return;
+      }
+      
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No reader available');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let hasReceivedContent = false;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          
+          // Process complete lines immediately as they arrive
+          let lineStartIndex = 0;
+          let newlineIndex;
+          
+          while ((newlineIndex = buffer.indexOf('\n', lineStartIndex)) !== -1) {
+            const line = buffer.slice(lineStartIndex, newlineIndex).trim();
+            lineStartIndex = newlineIndex + 1;
+            
+            if (line && line.startsWith('data: ')) {
+              const jsonText = line.slice(6).trim();
+              
+              if (!jsonText || jsonText === '[DONE]') {
+                yield { text: '', done: true };
+                return;
+              }
+
+              try {
+                const data = JSON.parse(jsonText);
+
+                if (data.error) {
+                  const errorMessage = data.error?.message || data.error || 'Unknown server error';
+                  const friendlyMessage = `Server error: ${errorMessage}`;
+                  console.warn(`[ApiClient] ${friendlyMessage}`);
+                  throw new Error(friendlyMessage);
+                }
+
+                // Handle request_id from first chunk (for cancellation support)
+                if (data.request_id) {
+                  // Uncomment to debug or troubleshoot stop streaming
+                  // console.log(`[ApiClient] Received request_id from server: ${data.request_id}`);
+                  if (!data.response && !data.done) {
+                    yield {
+                      text: '',
+                      done: false,
+                      request_id: data.request_id
+                    };
+                    continue;
+                  }
+                }
+
+                // Check for done chunk first - it may not have a response field
+                // This handles the final done chunk that contains threading metadata
+                if (data.done === true) {
+                    hasReceivedContent = true;
+                    yield {
+                      text: '',
+                      done: true,
+                      audio: data.audio,
+                      audioFormat: data.audio_format || data.audioFormat,
+                      threading: data.threading  // Pass through threading metadata
+                    };
+                    return;
+                }
+
+                // Note: Base64 audio filtering is handled by chatStore's sanitizeMessageContent
+                // We keep response text as-is here and let the application layer decide
+                const responseText = data.response || '';
+
+                // Handle streaming audio chunks
+                if (data.audio_chunk !== undefined) {
+                  yield {
+                    text: '',
+                    done: false,
+                    audio_chunk: data.audio_chunk,
+                    audioFormat: data.audioFormat || data.audio_format || 'opus',
+                    chunk_index: data.chunk_index ?? 0
+                  };
+                }
+
+                if (responseText || data.audio) {
+                  hasReceivedContent = true;
+                  yield {
+                    text: responseText,
+                    done: data.done || false,
+                    audio: data.audio,
+                    audioFormat: data.audio_format || data.audioFormat,
+                    threading: data.threading  // Include threading if present
+                  };
+                }
+
+              } catch (parseError: any) {
+                // Re-throw intentional errors (like moderation blocks) - don't swallow them
+                if (parseError?.message?.startsWith('Server error:')) {
+                  throw parseError;
+                }
+                // Log JSON parse errors for debugging
+                console.warn('[ApiClient] Unable to parse server response. This may be a temporary issue.');
+                console.warn('[ApiClient] Parse error details:', parseError?.message);
+                console.warn('[ApiClient] JSON text length:', jsonText?.length);
+                console.warn('[ApiClient] JSON text preview (first 200 chars):', jsonText?.substring(0, 200));
+                console.warn('[ApiClient] JSON text preview (last 200 chars):', jsonText?.substring(jsonText.length - 200));
+              }
+            } else if (line) {
+                // Handle raw text chunks that are not in SSE format
+                hasReceivedContent = true;
+                yield { text: line, done: false };
+            }
+          }
+          
+          buffer = buffer.slice(lineStartIndex);
+
+          if (buffer.length > STREAM_BUFFER_MAX_LENGTH) { // 1MB limit
+            console.warn('[ApiClient] Buffer too large, truncating...');
+            buffer = buffer.slice(-STREAM_BUFFER_TRIMMED_LENGTH); // Keep last 500KB
+          }
+        }
+        
+        if (hasReceivedContent) {
+          yield { text: '', done: true };
+        }
+        
+      } finally {
+        reader.releaseLock();
+      }
+      
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        // Check if this was user-initiated or timeout
+        if (abortSignal?.aborted) {
+          throw new Error('Stream cancelled by user');
+        }
+        throw new Error('Connection timed out. Please check if the server is running.');
+      } else if (this.hasFailedToFetch(error)) {
+        throw new Error(NETWORK_ERROR_MESSAGE);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Stop an active streaming request.
+   *
+   * @param sessionId - The session identifier
+   * @param requestId - The request identifier (from first stream chunk)
+   * @returns Promise resolving to true if stream was cancelled, false otherwise
+   */
+  public async stopChat(sessionId: string, requestId: string): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.apiUrl}/v1/chat/stop`, {
+        ...this.getFetchOptions({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            session_id: sessionId,
+            request_id: requestId
+          }),
+        }),
+      });
+
+      if (!response.ok) {
+        console.warn('[ApiClient] Failed to stop stream:', response.status);
+        return false;
+      }
+
+      const result = await response.json();
+      return result.status === 'cancelled';
+    } catch (error) {
+      console.error('[ApiClient] Error stopping stream:', error);
+      return false;
+    }
+  }
+
+  public async getConversationHistory(
+    sessionId?: string,
+    limit?: number
+  ): Promise<ConversationHistoryResponse> {
+    /**
+     * Retrieve persisted conversation history for a session.
+     *
+     * @param sessionId - Optional session ID to fetch. If not provided, uses current session.
+     * @param limit - Optional maximum number of messages to return
+     * @returns Promise resolving to conversation history payload
+     */
+    const targetSessionId = sessionId || this.sessionId;
+
+    if (!targetSessionId) {
+      throw new Error('No session ID provided and no current session available');
+    }
+
+    const headers: Record<string, string> = {};
+    if (this.apiKey) {
+      headers['X-API-Key'] = this.apiKey;
+    }
+
+    const url = new URL(`${this.apiUrl}/admin/chat-history/${targetSessionId}`);
+    if (typeof limit === 'number' && Number.isFinite(limit) && limit > 0) {
+      url.searchParams.set('limit', String(Math.floor(limit)));
+    }
+
+    const result = await this.requestJsonOrThrow<any>(
+      url.toString(),
+      {
+        method: 'GET',
+        headers
+      },
+      'Failed to fetch conversation history'
+    );
+
+    const messages = Array.isArray(result?.messages) ? result.messages : [];
+    const count = typeof result?.count === 'number' ? result.count : messages.length;
+
+    return {
+      session_id: result?.session_id || targetSessionId,
+      messages,
+      count
+    };
+  }
+
+  public async clearConversationHistory(sessionId?: string): Promise<{
+    status: string;
+    message: string;
+    session_id: string;
+    deleted_count: number;
+    timestamp: string;
+  }> {
+    /**
+     * Clear conversation history for a session.
+     *
+     * @param sessionId - Optional session ID to clear. If not provided, uses current session.
+     * @returns Promise resolving to operation result
+     * @throws Error if the operation fails
+     */
+    const targetSessionId = sessionId || this.sessionId;
+
+    if (!targetSessionId) {
+      throw new Error('No session ID provided and no current session available');
+    }
+
+    const apiKey = this.getRequiredApiKey('API key is required for clearing conversation history');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Session-ID': targetSessionId,
+      'X-API-Key': apiKey
+    };
+
+    return await this.requestJsonOrThrow<{
+      status: string;
+      message: string;
+      session_id: string;
+      deleted_count: number;
+      timestamp: string;
+    }>(
+      `${this.apiUrl}/admin/chat-history/${targetSessionId}`,
+      {
+        method: 'DELETE',
+        headers
+      },
+      'Failed to clear conversation history'
+    );
+  }
+
+  public async deleteConversationWithFiles(sessionId?: string, fileIds?: string[]): Promise<{
+    status: string;
+    message: string;
+    session_id: string;
+    deleted_messages: number;
+    deleted_files: number;
+    file_deletion_errors: string[] | null;
+    timestamp: string;
+  }> {
+    /**
+     * Delete a conversation and all associated files.
+     *
+     * This method performs a complete conversation deletion:
+     * - Deletes each file provided in fileIds (metadata, content, and vector store chunks)
+     * - Clears conversation history
+     *
+     * File tracking is managed by the frontend (localStorage). The backend is stateless
+     * and requires fileIds to be provided explicitly.
+     *
+     * @param sessionId - Optional session ID to delete. If not provided, uses current session.
+     * @param fileIds - Optional list of file IDs to delete (from conversation's attachedFiles)
+     * @returns Promise resolving to deletion result with counts
+     * @throws Error if the operation fails
+     */
+    const targetSessionId = sessionId || this.sessionId;
+
+    if (!targetSessionId) {
+      throw new Error('No session ID provided and no current session available');
+    }
+
+    const apiKey = this.getRequiredApiKey('API key is required for deleting conversation');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Session-ID': targetSessionId,
+      'X-API-Key': apiKey
+    };
+
+    // Build URL with file_ids query parameter
+    const fileIdsParam = fileIds && fileIds.length > 0 ? `?file_ids=${fileIds.join(',')}` : '';
+    const url = `${this.apiUrl}/admin/conversations/${targetSessionId}${fileIdsParam}`;
+
+    return await this.requestJsonOrThrow<{
+      status: string;
+      message: string;
+      session_id: string;
+      deleted_messages: number;
+      deleted_files: number;
+      file_deletion_errors: string[] | null;
+      timestamp: string;
+    }>(
+      url,
+      {
+        method: 'DELETE',
+        headers
+      },
+      'Failed to delete conversation'
+    );
+  }
+
+  /**
+   * Create a conversation thread from a parent message.
+   *
+   * @param messageId - ID of the parent message
+   * @param sessionId - Session ID of the parent conversation
+   * @returns Promise resolving to thread information
+   * @throws Error if the operation fails
+   */
+  public async createThread(messageId: string, sessionId: string): Promise<ThreadInfo> {
+    const apiKey = this.getRequiredApiKey('API key is required for creating threads');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-API-Key': apiKey
+    };
+
+    return await this.requestJsonOrThrow<ThreadInfo>(
+      `${this.apiUrl}/api/threads`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          message_id: messageId,
+          session_id: sessionId
+        })
+      },
+      'Failed to create thread'
+    );
+  }
+
+  /**
+   * Get thread information by thread ID.
+   *
+   * @param threadId - Thread identifier
+   * @returns Promise resolving to thread information
+   * @throws Error if the operation fails
+   */
+  public async getThreadInfo(threadId: string): Promise<ThreadInfo> {
+    const apiKey = this.getRequiredApiKey('API key is required for getting thread info');
+
+    const headers: Record<string, string> = {
+      'X-API-Key': apiKey
+    };
+
+    return await this.requestJsonOrThrow<ThreadInfo>(
+      `${this.apiUrl}/api/threads/${threadId}`,
+      {
+        method: 'GET',
+        headers
+      },
+      'Failed to get thread info'
+    );
+  }
+
+  /**
+   * Delete a thread and its associated dataset.
+   *
+   * @param threadId - Thread identifier
+   * @returns Promise resolving to deletion result
+   * @throws Error if the operation fails
+   */
+  public async deleteThread(threadId: string): Promise<{ status: string; message: string; thread_id: string }> {
+    const apiKey = this.getRequiredApiKey('API key is required for deleting threads');
+
+    const headers: Record<string, string> = {
+      'X-API-Key': apiKey
+    };
+
+    return await this.requestJsonOrThrow<{ status: string; message: string; thread_id: string }>(
+      `${this.apiUrl}/api/threads/${threadId}`,
+      {
+        method: 'DELETE',
+        headers
+      },
+      'Failed to delete thread'
+    );
+  }
+
+  /**
+   * Upload a file for processing and indexing.
+   *
+   * @param file - The file to upload
+   * @returns Promise resolving to upload response with file_id
+   * @throws Error if upload fails
+   */
+  public async uploadFile(file: File, prompt?: string): Promise<FileUploadResponse> {
+    this.getRequiredApiKey('API key is required for file upload');
+
+    const formData = new FormData();
+    formData.append('file', file);
+    if (prompt && prompt.trim().length > 0) {
+      formData.append('prompt', prompt.trim());
+    }
+
+    return await this.requestJsonOrThrow<FileUploadResponse>(
+      `${this.apiUrl}/api/files/upload`,
+      {
+        method: 'POST',
+        body: formData
+      },
+      'Failed to upload file'
+    );
+  }
+
+  /**
+   * List all files for the current API key.
+   * 
+   * @returns Promise resolving to list of file information
+   * @throws Error if request fails
+   */
+  public async listFiles(): Promise<FileInfo[]> {
+    this.getRequiredApiKey('API key is required for listing files');
+
+    return await this.requestJsonOrThrow<FileInfo[]>(
+      `${this.apiUrl}/api/files`,
+      {
+        method: 'GET'
+      },
+      'Failed to list files'
+    );
+  }
+
+  /**
+   * Get information about a specific file.
+   * 
+   * @param fileId - The file ID
+   * @returns Promise resolving to file information
+   * @throws Error if file not found or request fails
+   */
+  public async getFileInfo(fileId: string): Promise<FileInfo> {
+    this.getRequiredApiKey('API key is required for getting file info');
+
+    return await this.requestJsonOrThrow<FileInfo>(
+      `${this.apiUrl}/api/files/${fileId}`,
+      {
+        method: 'GET'
+      },
+      'Failed to get file info'
+    );
+  }
+
+  /**
+   * Query a specific file using semantic search.
+   * 
+   * @param fileId - The file ID
+   * @param query - The search query
+   * @param maxResults - Maximum number of results (default: 10)
+   * @returns Promise resolving to query results
+   * @throws Error if query fails
+   */
+  public async queryFile(fileId: string, query: string, maxResults: number = 10): Promise<FileQueryResponse> {
+    this.getRequiredApiKey('API key is required for querying files');
+
+    return await this.requestJsonOrThrow<FileQueryResponse>(
+      `${this.apiUrl}/api/files/${fileId}/query`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query, max_results: maxResults })
+      },
+      'Failed to query file'
+    );
+  }
+
+  /**
+   * Delete a specific file.
+   * 
+   * @param fileId - The file ID
+   * @returns Promise resolving to deletion result
+   * @throws Error if deletion fails
+   */
+  public async deleteFile(fileId: string): Promise<{ message: string; file_id: string }> {
+    this.getRequiredApiKey('API key is required for deleting files');
+
+    const url = `${this.apiUrl}/api/files/${fileId}`;
+    const fetchOptions = this.getFetchOptions({
+      method: 'DELETE'
+    });
+
+    try {
+      const response = await fetch(url, fetchOptions);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let friendlyMessage: string;
+        try {
+          const errorJson = JSON.parse(errorText);
+          friendlyMessage = errorJson.detail || errorJson.message || `Failed to delete file (HTTP ${response.status})`;
+        } catch {
+          friendlyMessage = `Failed to delete file (HTTP ${response.status})`;
+        }
+        console.warn(`[ApiClient] ${friendlyMessage}`);
+        throw new Error(friendlyMessage);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error: any) {
+      // Extract user-friendly error message
+      let friendlyMessage: string;
+      
+      if (this.hasFailedToFetch(error)) {
+        friendlyMessage = NETWORK_ERROR_MESSAGE;
+      } else if (error.message && !error.message.includes('Failed to delete file')) {
+        // Use existing message if it's already user-friendly
+        friendlyMessage = error.message;
+      } else {
+        friendlyMessage = `Failed to delete file. Please try again.`;
+      }
+      
+      console.warn(`[ApiClient] ${friendlyMessage}`);
+      throw new Error(friendlyMessage);
+    }
+  }
+
+  public async deleteAllFiles(): Promise<{ message: string; deleted_count: number; errors?: string[] | null }> {
+    this.getRequiredApiKey('API key is required for deleting files');
+
+    return await this.requestJsonOrThrow<{ message: string; deleted_count: number; errors?: string[] | null }>(
+      `${this.apiUrl}/api/files`,
+      {
+        method: 'DELETE'
+      },
+      'Failed to delete all files'
+    );
+  }
+}
+
+// Legacy compatibility functions - these create a default client instance
+// These are kept for backward compatibility but should be deprecated in favor of the class-based approach
+
+let defaultClient: ApiClient | null = null;
+
+// Configure the API with a custom URL, API key (optional), and session ID (optional)
+export const configureApi = (apiUrl: string, apiKey: string | null = null, sessionId: string | null = null): void => {
+  defaultClient = new ApiClient({ apiUrl, apiKey, sessionId });
+}
+
+// Legacy streamChat function that uses the default client
+export async function* streamChat(
+  message: string,
+  stream: boolean = true,
+  fileIds?: string[],
+  threadId?: string,
+  audioInput?: string,
+  audioFormat?: string,
+  language?: string,
+  returnAudio?: boolean,
+  ttsVoice?: string,
+  sourceLanguage?: string,
+  targetLanguage?: string,
+  abortSignal?: AbortSignal
+): AsyncGenerator<StreamResponse> {
+  if (!defaultClient) {
+    throw new Error('API not configured. Please call configureApi() with your server URL before using any API functions.');
+  }
+
+  yield* defaultClient.streamChat(
+    message,
+    stream,
+    fileIds,
+    threadId,
+    audioInput,
+    audioFormat,
+    language,
+    returnAudio,
+    ttsVoice,
+    sourceLanguage,
+    targetLanguage,
+    abortSignal
+  );
+}
+
+/**
+ * Stop an active chat stream (legacy function).
+ *
+ * @param sessionId - Session ID of the stream to stop
+ * @param requestId - Request ID of the stream to stop
+ * @returns Promise resolving to true if cancelled, false if not found
+ */
+export async function stopChat(sessionId: string, requestId: string): Promise<boolean> {
+  if (!defaultClient) {
+    throw new Error('API not configured. Please call configureApi() with your server URL before using any API functions.');
+  }
+
+  return defaultClient.stopChat(sessionId, requestId);
+}

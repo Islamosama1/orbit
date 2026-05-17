@@ -1,0 +1,1916 @@
+import React, { useState, useRef, useEffect, useCallback, useMemo, useLayoutEffect } from 'react';
+import { ArrowUp, CircleHelp, Mic, MicOff, Paperclip, X, Loader2, CheckCircle2, Volume2, VolumeX, Square, CircleAlert, TriangleAlert, Sparkles } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { useVoice } from '../hooks/useVoice';
+import { useAutocomplete } from '../hooks/useAutocomplete';
+import { useSkills } from '../hooks/useSkills';
+import { FileUpload } from './FileUpload';
+import { ConfirmationModal } from './ConfirmationModal';
+import { SkillPicker } from './SkillPicker';
+import { FileAttachment } from '../types';
+import { useChatStore } from '../stores/chatStore';
+import { debugLog, debugError } from '../utils/debug';
+import { AppConfig } from '../utils/config';
+import { FileUploadService, FileUploadProgress } from '../services/fileService';
+import { getAdapterInputPlaceholder, getDefaultInputPlaceholder, getEnableAudioInput, getEnableAudioOutput, getEnableAutocomplete, getEnableUploadButton, getIsAuthConfigured, getVoiceRecognitionLanguage, getVoiceSilenceTimeoutMs, resolveApiUrl } from '../utils/runtimeConfig';
+import { useSettings } from '../contexts/SettingsContext';
+import { playSoundEffect } from '../utils/soundEffects';
+import { audioStreamManager } from '../utils/audioStreamManager';
+import { useIsAuthenticated } from '../hooks/useIsAuthenticated';
+import { useLoginPromptStore } from '../stores/loginPromptStore';
+import { MarkdownRenderer } from './markdown';
+import { useTheme } from '../contexts/ThemeContext';
+import { useFocusTrap } from '../hooks/useFocusTrap';
+
+interface MessageInputProps {
+  onSend: (message: string, fileIds?: string[], threadId?: string, skill?: string) => void;
+  disabled?: boolean;
+  placeholder?: string;
+  autoFocusEnabled?: boolean;
+  suppressMobileAutoFocus?: boolean;
+  /**
+   * When true, constrains the input to a tighter max width and centers it.
+   * Used for the empty state layout so the field and title feel aligned.
+   */
+  isCentered?: boolean;
+  /**
+   * Optional max width utility class for non-centered layouts.
+   */
+  maxWidthClass?: string;
+  /**
+   * Adapter notes/description content shown via a help icon modal.
+   */
+  adapterNotes?: string | null;
+}
+
+const MIME_EXTENSION_MAP: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/tiff': 'tiff',
+  'image/tif': 'tif',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'application/pdf': 'pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/msword': 'doc',
+  'text/plain': 'txt',
+  'text/markdown': 'md',
+  'application/json': 'json'
+};
+
+const DEFAULT_TEXTAREA_VERTICAL_PADDING = 4;
+const VERTICAL_ALIGNMENT_OFFSET = 3;
+const PLACEHOLDER_VERTICAL_OFFSET = 0;
+const INLINE_SUGGESTION_VERTICAL_OFFSET = 0;
+const TEXTAREA_HORIZONTAL_PADDING = 2;
+
+function resolveAutocompleteSupport(adapterInfo: unknown): boolean | null {
+  if (!adapterInfo || typeof adapterInfo !== 'object') {
+    return null;
+  }
+
+  const info = adapterInfo as Record<string, unknown>;
+  const directCapabilityKeys = [
+    'supportsAutocomplete',
+    'isAutocompleteSupported',
+    'autocompleteSupported'
+  ];
+
+  for (const key of directCapabilityKeys) {
+    if (typeof info[key] === 'boolean') {
+      return info[key] as boolean;
+    }
+  }
+
+  const nestedCapabilityParents = ['capabilities', 'features'];
+  const nestedCapabilityKeys = ['autocomplete', 'supportsAutocomplete', 'autocomplete_supported'];
+
+  for (const parent of nestedCapabilityParents) {
+    const nested = info[parent];
+    if (!nested || typeof nested !== 'object') {
+      continue;
+    }
+
+    const nestedInfo = nested as Record<string, unknown>;
+    for (const key of nestedCapabilityKeys) {
+      if (typeof nestedInfo[key] === 'boolean') {
+        return nestedInfo[key] as boolean;
+      }
+    }
+  }
+
+  return null;
+}
+
+function getExtensionFromMimeType(mimeType: string | undefined): string {
+  if (!mimeType) {
+    return 'bin';
+  }
+  if (MIME_EXTENSION_MAP[mimeType]) {
+    return MIME_EXTENSION_MAP[mimeType];
+  }
+  const parts = mimeType.split('/');
+  return parts.length === 2 && parts[1] ? parts[1] : 'bin';
+}
+
+function sanitizeFilenamePart(name: string): string {
+  const sanitized = name.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_');
+  return sanitized || 'pasted-file';
+}
+
+function getExtensionFromName(name: string): string | null {
+  const lastDot = name.lastIndexOf('.');
+  if (lastDot === -1 || lastDot === name.length - 1) {
+    return null;
+  }
+  return name.slice(lastDot + 1).toLowerCase();
+}
+
+function getBaseName(name: string): string {
+  const lastDot = name.lastIndexOf('.');
+  if (lastDot === -1) {
+    return name;
+  }
+  return name.slice(0, lastDot);
+}
+
+function prepareClipboardFile(file: File, index: number): File {
+  const timestamp = Date.now();
+  const originalName = file.name && file.name.trim().length > 0 ? file.name.trim() : `pasted-file`;
+  const baseName = sanitizeFilenamePart(getBaseName(originalName));
+  const existingExtension = getExtensionFromName(originalName);
+  const extension = existingExtension || getExtensionFromMimeType(file.type);
+  const uniqueName = `${baseName}-${timestamp}-${index}.${extension}`;
+  return new File([file], uniqueName, { type: file.type || 'application/octet-stream' });
+}
+
+export function MessageInput({ 
+  onSend, 
+  disabled = false, 
+  placeholder = getDefaultInputPlaceholder(),
+  autoFocusEnabled = true,
+  suppressMobileAutoFocus = false,
+  isCentered = false,
+  maxWidthClass = 'max-w-5xl',
+  adapterNotes
+}: MessageInputProps) {
+  const [message, setMessage] = useState('');
+  const [isComposing, setIsComposing] = useState(false);
+  const [isFocused, setIsFocused] = useState(false);
+  const [showAgentInfo, setShowAgentInfo] = useState(false);
+  const [showFileUpload, setShowFileUpload] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<FileAttachment[]>([]);
+  const [conversationUploadingState, setConversationUploadingState] = useState<Record<string, boolean>>({});
+  const [pasteUploadingFiles, setPasteUploadingFiles] = useState<Map<string, FileUploadProgress>>(new Map());
+  const [isHoveringUpload, setIsHoveringUpload] = useState(false);
+  const [isHoveringMic, setIsHoveringMic] = useState(false);
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [uploadSuccessMessage, setUploadSuccessMessage] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [fileDeleteConfirmation, setFileDeleteConfirmation] = useState<{
+    isOpen: boolean;
+    fileId: string;
+    filename: string;
+    isDeleting: boolean;
+  }>({
+    isOpen: false,
+    fileId: '',
+    filename: '',
+    isDeleting: false
+  });
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const agentInfoModalRef = useRef<HTMLDivElement>(null);
+  const uploadPanelRef = useRef<HTMLDivElement>(null);
+  const autocompletePanelRef = useRef<HTMLDivElement>(null);
+  const processedFilesRef = useRef<Set<string>>(new Set());
+  const voiceMessageRef = useRef('');
+  const pendingVoiceAutoSendRef = useRef(false);
+  const lastProcessedVoiceCompletionRef = useRef(0);
+  const lastConversationIdRef = useRef<string | null>(null);
+  const { settings, updateSettings } = useSettings();
+  const { theme, isDark } = useTheme();
+  const agentInfoForcedThemeClass = theme.mode === 'dark' ? 'dark' : theme.mode === 'light' ? 'light' : '';
+  const agentInfoSyntaxTheme: 'dark' | 'light' = isDark ? 'dark' : 'light';
+  useFocusTrap(agentInfoModalRef, { enabled: showAgentInfo, onEscape: () => setShowAgentInfo(false) });
+  const setConversationUploading = useCallback((conversationId: string | null, uploading: boolean) => {
+    if (!conversationId) {
+      return;
+    }
+    setConversationUploadingState(prev => {
+      if (prev[conversationId] === uploading) {
+        return prev;
+      }
+      const next = { ...prev };
+      if (uploading) {
+        next[conversationId] = true;
+      } else {
+        delete next[conversationId];
+      }
+      return next;
+    });
+  }, []);
+  const [voiceCompletionCount, setVoiceCompletionCount] = useState(0);
+  const [showSkillPicker, setShowSkillPicker] = useState(false);
+  const [activeSkillIndex, setActiveSkillIndex] = useState(0);
+  const [textareaVerticalPadding, setTextareaVerticalPadding] = useState(() => ({
+    top: DEFAULT_TEXTAREA_VERTICAL_PADDING + VERTICAL_ALIGNMENT_OFFSET,
+    bottom: Math.max(DEFAULT_TEXTAREA_VERTICAL_PADDING - VERTICAL_ALIGNMENT_OFFSET, 0)
+  }));
+  const [textareaLineHeight, setTextareaLineHeight] = useState<number | null>(null);
+
+  const isAuthenticated = useIsAuthenticated();
+  const isGuest = getIsAuthConfigured() && !isAuthenticated;
+  const showLoginPrompt = useLoginPromptStore(state => state.showLoginPrompt);
+  const { createConversation, currentConversationId, conversations, isLoading, syncConversationFiles, stopStreaming, removeFileFromConversation } = useChatStore();
+  const currentConversation = conversations.find(c => c.id === currentConversationId);
+  const conversationMessagesCount = currentConversation
+    ? currentConversation.messages.filter(msg => !(msg.role === 'assistant' && msg.isStreaming)).length
+    : 0;
+  const totalMessagesCount = conversations.reduce(
+    (total, conv) => total + conv.messages.filter(msg => !(msg.role === 'assistant' && msg.isStreaming)).length,
+    0
+  );
+  const conversationMessageLimitReached =
+    !!currentConversation &&
+    AppConfig.maxMessagesPerConversation !== null &&
+    conversationMessagesCount >= AppConfig.maxMessagesPerConversation;
+  const workspaceMessageLimitReached =
+    AppConfig.maxTotalMessages !== null && totalMessagesCount >= AppConfig.maxTotalMessages;
+
+  const handleVoiceCompletion = useCallback(() => {
+    setVoiceCompletionCount((count) => count + 1);
+  }, []);
+  const voiceSilenceTimeoutMs = getVoiceSilenceTimeoutMs();
+  const voiceRecognitionLanguage = getVoiceRecognitionLanguage();
+
+  const {
+    isListening,
+    isSupported: voiceSupported,
+    startListening,
+    stopListening,
+    error: voiceError
+  } = useVoice((text) => {
+    setMessage(prev => {
+      const separator = prev.length > 0 && !/\s$/.test(prev) ? ' ' : '';
+      const updated = (prev + separator + text).slice(0, AppConfig.maxMessageLength);
+      voiceMessageRef.current = updated;
+      return updated;
+    });
+  }, handleVoiceCompletion, {
+    silenceTimeoutMs: voiceSilenceTimeoutMs,
+    language: voiceRecognitionLanguage || undefined
+  });
+
+  const audioOutputEnabled = getEnableAudioOutput();
+  const audioInputEnabled = getEnableAudioInput();
+  const voiceRecordingAvailable = audioInputEnabled && voiceSupported;
+  const uploadFeatureEnabled = getEnableUploadButton();
+  const autocompleteEnabled = getEnableAutocomplete();
+  const adapterSupportsAutocomplete = resolveAutocompleteSupport(currentConversation?.adapterInfo);
+  // Autocomplete suggestions based on nl_examples from intent templates
+  const {
+    suggestions,
+    selectedIndex,
+    setSelectedIndex,
+    selectNext,
+    selectPrevious,
+    clearSuggestions,
+    focusInputAfterSelection,
+    suppressUntilQueryChange
+  } = useAutocomplete(message, {
+    enabled: autocompleteEnabled && !isListening,
+    apiUrl: currentConversation?.apiUrl,
+    adapterName: currentConversation?.adapterName,
+    sessionId: currentConversation?.sessionId,
+    adapterSupportsAutocomplete,
+    inputRef: textareaRef
+  });
+  const hasSuggestions = suggestions.length > 0;
+  const autocompleteVisible = !isListening;
+  const showAutocompletePanel = autocompleteVisible && hasSuggestions && !showSkillPicker;
+
+  const { skills, isLoading: skillsLoading, selectedSkill, selectSkill, clearSkill } = useSkills({
+    adapterName: currentConversation?.adapterName,
+    enabled: true,
+    supportsThreading: currentConversation?.adapterInfo?.supportsThreading ?? false,
+  });
+  const skillQuery = message.startsWith('/') ? message.slice(1) : '';
+  const normalizedSkillQuery = skillQuery.toLowerCase().replace(/-/g, ' ');
+  const filteredSkills = useMemo(() => {
+    if (!normalizedSkillQuery) {
+      return skills;
+    }
+    return skills.filter(skill =>
+      skill.name.replace(/-/g, ' ').toLowerCase().includes(normalizedSkillQuery) ||
+      skill.description.toLowerCase().includes(normalizedSkillQuery)
+    );
+  }, [normalizedSkillQuery, skills]);
+  const safeActiveSkillIndex = filteredSkills.length > 0 ? Math.min(activeSkillIndex, filteredSkills.length - 1) : 0;
+  const activeSkill = filteredSkills[safeActiveSkillIndex] ?? null;
+  const activeSuggestionIndex = selectedIndex >= 0 ? selectedIndex : 0;
+  const activeSuggestion = hasSuggestions ? suggestions[activeSuggestionIndex] : null;
+  const inlineSuggestion = useMemo(() => {
+    if (!activeSuggestion) {
+      return null;
+    }
+    const suggestionText = activeSuggestion.text || '';
+    if (!message) {
+      return suggestionText;
+    }
+    const currentValue = message;
+    if (suggestionText.toLowerCase().startsWith(currentValue.toLowerCase()) && suggestionText.length > currentValue.length) {
+      return suggestionText.slice(currentValue.length);
+    }
+    return null;
+  }, [activeSuggestion, message]);
+  const showCustomPlaceholder = message.trim().length === 0 && !inlineSuggestion;
+  const renderSuggestionText = useCallback((suggestionText: string) => {
+    if (!message) {
+      return <span className="line-clamp-1 text-current">{suggestionText}</span>;
+    }
+
+    if (!suggestionText.toLowerCase().startsWith(message.toLowerCase())) {
+      return <span className="line-clamp-1 text-current">{suggestionText}</span>;
+    }
+
+    const typedPart = suggestionText.slice(0, message.length);
+    const completionPart = suggestionText.slice(message.length);
+
+    return (
+      <span className="line-clamp-1">
+        <span className="text-gray-500 dark:text-[#8e8ea0]">{typedPart}</span>
+        <span className="font-semibold text-[#353740] dark:text-[#ececf1]">{completionPart}</span>
+      </span>
+    );
+  }, [message]);
+
+  const selectSkillAndClose = useCallback((skill: typeof skills[number]) => {
+    selectSkill(skill);
+    setShowSkillPicker(false);
+    setMessage('');
+    setActiveSkillIndex(0);
+    textareaRef.current?.focus();
+  }, [selectSkill]);
+
+  const closeSkillPicker = useCallback(() => {
+    setShowSkillPicker(false);
+    setMessage('');
+    setActiveSkillIndex(0);
+    textareaRef.current?.focus();
+  }, []);
+
+  const adjustTextareaVerticalAlignment = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof window === 'undefined') {
+      return;
+    }
+    const applyPadding = (value: number) => {
+      const topPadding = value + VERTICAL_ALIGNMENT_OFFSET;
+      const bottomPadding = Math.max(value - VERTICAL_ALIGNMENT_OFFSET, 0);
+      textarea.style.paddingTop = `${topPadding}px`;
+      textarea.style.paddingBottom = `${bottomPadding}px`;
+      setTextareaVerticalPadding({
+        top: topPadding,
+        bottom: bottomPadding
+      });
+    };
+    const computedStyle = window.getComputedStyle(textarea);
+    const lineHeight = parseFloat(computedStyle.lineHeight || '0');
+    if (!Number.isNaN(lineHeight) && lineHeight > 0) {
+      setTextareaLineHeight(prev => (prev === lineHeight ? prev : lineHeight));
+    } else {
+      setTextareaLineHeight(prev => (prev === null ? prev : null));
+    }
+    if (!lineHeight || Number.isNaN(lineHeight)) {
+      applyPadding(DEFAULT_TEXTAREA_VERTICAL_PADDING);
+      return;
+    }
+    const contentHeight = textarea.scrollHeight;
+    const clientHeight = textarea.clientHeight;
+    const isMultiline = contentHeight > lineHeight + 2;
+    if (isMultiline) {
+      applyPadding(DEFAULT_TEXTAREA_VERTICAL_PADDING);
+      return;
+    }
+    const availableSpace = Math.max(clientHeight - lineHeight, 0);
+    const verticalPadding = Math.max(availableSpace / 2, 0);
+    applyPadding(verticalPadding);
+  }, []);
+  const isCaretAtMessageEnd = () => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return false;
+    }
+    return textarea.selectionStart === textarea.selectionEnd && textarea.selectionStart === message.length;
+  };
+
+  // Check if any files are currently uploading or processing
+  const conversationFiles = currentConversation?.attachedFiles || [];
+  const visibleAttachedFiles = currentConversationId ? conversationFiles : attachedFiles;
+  const totalFilesAcrossConversations = conversations.reduce(
+    (total, conv) => total + (conv.attachedFiles?.length || 0),
+    0
+  );
+  const conversationFileLimitReached =
+    AppConfig.maxFilesPerConversation !== null &&
+    AppConfig.maxFilesPerConversation > 0 &&
+    conversationFiles.length >= AppConfig.maxFilesPerConversation;
+  const workspaceFileLimitReached =
+    AppConfig.maxTotalFiles !== null && totalFilesAcrossConversations >= AppConfig.maxTotalFiles;
+  
+  // Check if adapter supports file processing
+  const isFileSupported = currentConversation?.adapterInfo?.isFileSupported ?? false;
+  
+  // Don't sync attachedFiles with conversationFiles - attachedFiles should only show files attached to current message
+  // Files in conversation will be included when sending the message via conversationFiles
+  
+  // Check if any attached files are still processing
+  // Include files with undefined status (still uploading), 'uploading', or 'processing' status
+  const hasProcessingFiles = visibleAttachedFiles.some(file => {
+    if (!file.processing_status) {
+      // File doesn't have status yet - likely still uploading
+      return true;
+    }
+    return file.processing_status !== 'completed' && 
+           file.processing_status !== 'error' &&
+           file.processing_status !== 'failed';
+  });
+
+  const isUploading = currentConversationId ? !!conversationUploadingState[currentConversationId] : false;
+  const hasAnyUploadingConversations = Object.values(conversationUploadingState).some(Boolean);
+  const hasTypedMessage = message.trim().length > 0;
+
+  // Disable input if files are uploading, processing, or if already disabled
+  const messageLimitActive = conversationMessageLimitReached || workspaceMessageLimitReached;
+  const isInputDisabled = disabled || hasProcessingFiles || isUploading || messageLimitActive;
+  
+  const canUseFileUploads = uploadFeatureEnabled && isFileSupported;
+  // Disable file upload button if feature disabled, adapter doesn't support files, or input is disabled
+  const fileLimitActive = conversationFileLimitReached || workspaceFileLimitReached;
+  const isFileUploadDisabled = !canUseFileUploads || isInputDisabled || fileLimitActive;
+
+  // Auto-resize textarea with maximum height limit
+  useLayoutEffect(() => {
+    if (textareaRef.current) {
+      const textarea = textareaRef.current;
+      const maxHeight = 120; // Maximum height in pixels (about 4-5 lines)
+      textarea.style.height = 'auto';
+      const scrollHeight = textarea.scrollHeight;
+      // Set height to scrollHeight, but cap it at maxHeight
+      textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+      // Enable overflow-y when content exceeds max height
+      textarea.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
+      adjustTextareaVerticalAlignment();
+    }
+  }, [message, adjustTextareaVerticalAlignment]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+    const resizeObserver = new ResizeObserver(() => {
+      adjustTextareaVerticalAlignment();
+    });
+    resizeObserver.observe(textarea);
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [adjustTextareaVerticalAlignment]);
+
+  // Helper function to check if focus is in any textarea (including thread inputs)
+  const isFocusInTextarea = () => {
+    const activeElement = document.activeElement;
+    return activeElement && activeElement.tagName === 'TEXTAREA';
+  };
+
+  const shouldSkipAutoFocus = useCallback(() => {
+    if (!suppressMobileAutoFocus || typeof window === 'undefined') {
+      return false;
+    }
+    return window.matchMedia('(max-width: 767px)').matches;
+  }, [suppressMobileAutoFocus]);
+
+  // Auto-focus when not disabled (when AI response is complete)
+  useEffect(() => {
+    // Only auto-focus if no textarea is currently focused (to avoid stealing focus from thread inputs)
+    if (shouldSkipAutoFocus()) {
+      return;
+    }
+    if (autoFocusEnabled && !isInputDisabled && textareaRef.current && !isFocusInTextarea()) {
+      textareaRef.current.focus();
+    }
+  }, [autoFocusEnabled, isInputDisabled, suppressMobileAutoFocus, shouldSkipAutoFocus]);
+
+  // Focus input field when assistant response finishes (isLoading becomes false)
+  const prevIsLoadingRef = useRef(isLoading);
+  useEffect(() => {
+    // If loading just finished (transitioned from true to false), focus the input
+    // But only if user is not currently focused on any textarea (including thread inputs)
+    if (shouldSkipAutoFocus()) {
+      prevIsLoadingRef.current = isLoading;
+      return;
+    }
+    if (autoFocusEnabled && prevIsLoadingRef.current && !isLoading && !isInputDisabled && textareaRef.current) {
+      // Small delay to ensure the UI has updated
+      setTimeout(() => {
+        // Only focus main input if user is not already focused on a textarea
+        if (textareaRef.current && !isFocusInTextarea()) {
+          textareaRef.current.focus();
+        }
+      }, 100);
+    }
+    prevIsLoadingRef.current = isLoading;
+  }, [autoFocusEnabled, isLoading, isInputDisabled, suppressMobileAutoFocus, shouldSkipAutoFocus]);
+
+  // Auto-send message when voice recording completes
+  useEffect(() => {
+    if (!voiceRecordingAvailable) {
+      return;
+    }
+
+    if (voiceCompletionCount > lastProcessedVoiceCompletionRef.current) {
+      pendingVoiceAutoSendRef.current = true;
+      lastProcessedVoiceCompletionRef.current = voiceCompletionCount;
+    }
+
+    if (!pendingVoiceAutoSendRef.current || voiceCompletionCount === 0) {
+      return;
+    }
+
+    const voiceMessage = voiceMessageRef.current.trim();
+    const currentState = useChatStore.getState();
+
+    debugLog('[MessageInput] Auto-send check after voice completion:', {
+      hasMessage: !!voiceMessage,
+      isInputDisabled,
+      isComposing,
+      isLoading: currentState.isLoading
+    });
+
+    pendingVoiceAutoSendRef.current = false;
+    if (!voiceMessage) {
+      return;
+    }
+
+    if (isInputDisabled || isComposing) {
+      debugLog('[MessageInput] Auto-send skipped because input is currently disabled or composing');
+      return;
+    }
+
+    const currentConv = currentState.conversations.find(conv => conv.id === currentState.currentConversationId);
+    const conversationFiles = currentConv?.attachedFiles || [];
+    const allFileIds = conversationFiles.map(f => f.file_id);
+
+    debugLog('[MessageInput] Auto-sending voice message immediately:', voiceMessage);
+    onSend(voiceMessage, allFileIds.length > 0 ? allFileIds : undefined, undefined, selectedSkill?.name);
+    setTimeout(() => {
+      setShowSkillPicker(false);
+    }, 0);
+
+    clearSuggestions();
+    setTimeout(() => {
+      setMessage('');
+    }, 0);
+    voiceMessageRef.current = '';
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.overflowY = 'hidden';
+      adjustTextareaVerticalAlignment();
+    }
+  }, [voiceRecordingAvailable, voiceCompletionCount, isInputDisabled, isComposing, onSend, selectedSkill, adjustTextareaVerticalAlignment, clearSuggestions]);
+
+  // Close upload area when upload starts (hide upload widget, show only progress)
+  useEffect(() => {
+    if (isUploading && showFileUpload) {
+      // Upload has started - hide upload widget, only progress will be visible
+      setTimeout(() => {
+        setShowFileUpload(false);
+      }, 0);
+    }
+  }, [isUploading, showFileUpload]);
+
+  // Re-open upload area when upload completes (if user wants to upload more)
+  // Only reopen if no files are attached yet (otherwise user probably doesn't need it)
+  useEffect(() => {
+    if (!isUploading && visibleAttachedFiles.length === 0 && !showFileUpload) {
+      // Upload completed and no files attached - could reopen if needed
+      // But we'll keep it closed by default and let user click icon to reopen
+    }
+  }, [isUploading, showFileUpload, visibleAttachedFiles.length]);
+
+  const syncFilesWithConversation = useCallback((files: FileAttachment[], targetConversationId?: string | null) => {
+    setTimeout(() => {
+      let store = useChatStore.getState();
+      let conversationId = targetConversationId || store.currentConversationId;
+      
+      if (!conversationId) {
+        conversationId = createConversation();
+        store = useChatStore.getState();
+        conversationId = store.currentConversationId || conversationId;
+      }
+
+      if (!conversationId) {
+        debugError('[MessageInput] Unable to sync files: conversation ID missing');
+        return;
+      }
+      
+      const currentFileIds = new Set(files.map(f => f.file_id));
+      const keysToRemove: string[] = [];
+      processedFilesRef.current.forEach((_, key) => {
+        const [, ...fileIdParts] = key.split('-');
+        const fileId = fileIdParts.join('-');
+        if (!currentFileIds.has(fileId)) {
+          keysToRemove.push(key);
+        }
+      });
+      keysToRemove.forEach(key => processedFilesRef.current.delete(key));
+      
+      files.forEach(file => {
+        const fileKey = `${conversationId}-${file.file_id}`;
+        if (!processedFilesRef.current.has(fileKey)) {
+          processedFilesRef.current.add(fileKey);
+          
+          debugLog(`[MessageInput] Adding file ${file.file_id} to conversation ${conversationId}`);
+          store.addFileToConversation(conversationId!, file);
+        }
+      });
+    }, 0);
+  }, [createConversation]);
+
+  // Reset attached files when switching conversations to avoid bleed-through
+  useEffect(() => {
+    if (currentConversationId !== lastConversationIdRef.current) {
+      lastConversationIdRef.current = currentConversationId || null;
+      if (currentConversationId && currentConversation) {
+        const convFiles = currentConversation.attachedFiles || [];
+        setTimeout(() => {
+          setAttachedFiles(convFiles.map(file => ({ ...file })));
+        }, 0);
+      } else {
+        setTimeout(() => {
+          setAttachedFiles([]);
+        }, 0);
+      }
+    }
+  }, [currentConversationId, currentConversation]);
+
+  // Sync attachedFiles with conversationFiles to ensure pasted files appear in UI
+  useEffect(() => {
+    if (currentConversationId && currentConversation) {
+      const convFiles = currentConversation.attachedFiles || [];
+      if (convFiles.length > 0) {
+        setTimeout(() => {
+          setAttachedFiles(prev => {
+            const attachedFileIds = new Set(prev.map(f => f.file_id));
+            const missingFiles = convFiles.filter(f => !attachedFileIds.has(f.file_id));
+            
+            if (missingFiles.length > 0) {
+              debugLog(`[MessageInput] Syncing ${missingFiles.length} missing files from conversation to UI`);
+              return [...prev, ...missingFiles];
+            }
+            return prev;
+          });
+        }, 0);
+      } else if (convFiles.length === 0 && attachedFiles.length > 0) {
+        setTimeout(() => {
+          setAttachedFiles([]);
+        }, 0);
+      }
+    }
+  }, [currentConversationId, currentConversation, conversations, attachedFiles.length]);
+
+  // Track the last conversation/file signature we synced to avoid redundant fetch loops
+  const lastSyncedConversationRef = useRef<string | null>(null);
+  const lastSyncedSignatureRef = useRef<string>('');
+
+  // Stable file signature derived from file IDs — avoids re-triggering when the
+  // attachedFiles array reference changes but the actual file set hasn't.
+  const convFiles = currentConversation?.attachedFiles || [];
+  const fileSignature = convFiles.length > 0
+    ? `${convFiles.length}:${convFiles.map(f => f.file_id).join('|')}`
+    : '';
+  const hasFilesStillProcessing = convFiles.some(f =>
+    !f.processing_status ||
+    f.processing_status === 'processing' ||
+    f.processing_status === 'uploading'
+  );
+
+  // Sync and poll file status when switching to a conversation or when files change
+  useEffect(() => {
+    if (!currentConversationId || !currentConversation?.adapterName) {
+      return;
+    }
+
+    const hasFiles = fileSignature !== '';
+
+    const shouldSyncOnChange =
+      hasFiles &&
+      (
+        lastSyncedConversationRef.current !== currentConversationId ||
+        lastSyncedSignatureRef.current !== fileSignature
+      );
+
+    if (shouldSyncOnChange) {
+      debugLog(`[MessageInput] Syncing files for conversation ${currentConversationId}...`);
+      lastSyncedConversationRef.current = currentConversationId;
+      lastSyncedSignatureRef.current = fileSignature;
+      syncConversationFiles(currentConversationId).catch(error => {
+        debugError('[MessageInput] Failed to sync conversation files:', error);
+      });
+    } else if (!hasFiles) {
+      // Reset signature when conversation has no files to ensure next upload triggers a sync
+      lastSyncedConversationRef.current = currentConversationId;
+      lastSyncedSignatureRef.current = '';
+    }
+
+    // Only poll if there are files still processing
+    if (!hasFilesStillProcessing) {
+      return;
+    }
+
+    debugLog(`[MessageInput] Files still processing, starting poll...`);
+
+    // Poll for file status updates every 3 seconds for files that are still processing
+    const pollInterval = setInterval(async () => {
+      const currentState = useChatStore.getState();
+      const currentConv = currentState.conversations.find(conv => conv.id === currentConversationId);
+
+      if (!currentConv) {
+        clearInterval(pollInterval);
+        return;
+      }
+
+      const currentFiles = currentConv.attachedFiles || [];
+      const stillProcessing = currentFiles.filter(f =>
+        !f.processing_status ||
+        f.processing_status === 'processing' ||
+        f.processing_status === 'uploading'
+      );
+
+      if (stillProcessing.length === 0) {
+        debugLog('[MessageInput] All files completed processing, stopping poll');
+        clearInterval(pollInterval);
+        return;
+      }
+
+      // Sync again to get updated statuses
+      try {
+        await syncConversationFiles(currentConversationId);
+      } catch (error) {
+        debugError('[MessageInput] Failed to poll file status:', error);
+      }
+    }, 3000);
+
+    return () => {
+      clearInterval(pollInterval);
+    };
+    // Use stable fileSignature string instead of attachedFiles array reference.
+  }, [currentConversationId, currentConversation?.adapterName, fileSignature, hasFilesStillProcessing, syncConversationFiles]);
+
+  useEffect(() => {
+    setTimeout(() => {
+      setConversationUploadingState(prev => {
+        const existingIds = new Set(conversations.map(conv => conv.id));
+        let changed = false;
+        const next = { ...prev };
+        Object.keys(next).forEach(id => {
+          if (!existingIds.has(id)) {
+            delete next[id];
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+    }, 0);
+  }, [conversations]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (hasTypedMessage && !isInputDisabled && !isComposing) {
+      // Stop listening if still active
+      if (isListening) {
+        stopListening();
+      }
+
+      // For multimodal conversations, send ALL files attached to the conversation
+      // (not just the newly attached ones in this message)
+      const conversationFiles = currentConversation?.attachedFiles || [];
+      const allFileIds = conversationFiles.map(f => f.file_id);
+
+      const activeSkillName = selectedSkill?.name;
+      onSend(message.trim(), allFileIds.length > 0 ? allFileIds : undefined, undefined, activeSkillName);
+      setShowSkillPicker(false);
+      playSoundEffect('messageSent', settings.soundEnabled);
+      setMessage('');
+      voiceMessageRef.current = ''; // Clear voice message ref when manually submitting
+      setAttachedFiles([]);
+      setShowFileUpload(false);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.overflowY = 'hidden';
+        adjustTextareaVerticalAlignment();
+      }
+    }
+  };
+
+  const showUploadSuccessToast = useCallback((uploadedFiles: FileAttachment[]) => {
+    if (!uploadedFiles || uploadedFiles.length === 0) {
+      return;
+    }
+
+    const successMessage =
+      uploadedFiles.length === 1
+        ? `File "${uploadedFiles[0].filename}" uploaded successfully`
+        : `${uploadedFiles.length} files uploaded successfully`;
+
+    playSoundEffect('success', settings.soundEnabled);
+    setUploadSuccessMessage(successMessage);
+    setTimeout(() => {
+      setUploadSuccessMessage(null);
+    }, 6000);
+  }, [settings.soundEnabled]);
+
+  const handleFilesSelected = useCallback((conversationId: string | null, files: FileAttachment[]) => {
+    debugLog(`[MessageInput] handleFilesSelected called with ${files.length} files for conversation ${conversationId}:`, files);
+    if (!conversationId) {
+      return;
+    }
+    if (conversationId === currentConversationId) {
+      setAttachedFiles(files);
+    }
+    syncFilesWithConversation(files, conversationId);
+  }, [currentConversationId, syncFilesWithConversation]);
+
+  const handleUploadSuccessToast = useCallback((conversationId: string, newFiles: FileAttachment[]) => {
+    if (conversationId !== currentConversationId) {
+      return;
+    }
+    showUploadSuccessToast(newFiles);
+  }, [currentConversationId, showUploadSuccessToast]);
+
+  const openFileDeleteConfirmation = useCallback((file: FileAttachment) => {
+    setFileDeleteConfirmation({
+      isOpen: true,
+      fileId: file.file_id,
+      filename: file.filename,
+      isDeleting: false
+    });
+  }, []);
+
+  const closeFileDeleteConfirmation = useCallback(() => {
+    setFileDeleteConfirmation(prev => {
+      if (prev.isDeleting) {
+        return prev;
+      }
+      return {
+        isOpen: false,
+        fileId: '',
+        filename: '',
+        isDeleting: false
+      };
+    });
+  }, []);
+
+  const confirmFileDelete = useCallback(async () => {
+    if (!currentConversationId || !fileDeleteConfirmation.fileId) {
+      return;
+    }
+
+    setFileDeleteConfirmation(prev => ({ ...prev, isDeleting: true }));
+
+    try {
+      await removeFileFromConversation(currentConversationId, fileDeleteConfirmation.fileId);
+      setAttachedFiles(prev => prev.filter(file => file.file_id !== fileDeleteConfirmation.fileId));
+      setFileDeleteConfirmation({
+        isOpen: false,
+        fileId: '',
+        filename: '',
+        isDeleting: false
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to remove file';
+      debugError('[MessageInput] Failed to remove file:', error);
+      setUploadError(errorMessage);
+      setFileDeleteConfirmation({
+        isOpen: false,
+        fileId: '',
+        filename: '',
+        isDeleting: false
+      });
+    }
+  }, [currentConversationId, fileDeleteConfirmation.fileId, removeFileFromConversation]);
+
+  const normalizeSuggestionText = useCallback((text: string) => {
+    return text.replace(/\s+/g, ' ').trim();
+  }, []);
+
+  const handleSelectSuggestion = useCallback((text: string) => {
+    const normalized = normalizeSuggestionText(text);
+    setMessage(normalized);
+    clearSuggestions();
+    suppressUntilQueryChange(normalized);
+    focusInputAfterSelection(normalized);
+  }, [clearSuggestions, focusInputAfterSelection, normalizeSuggestionText, suppressUntilQueryChange]);
+
+  const acceptSuggestionByIndex = useCallback((index: number) => {
+    if (index < 0) {
+      return;
+    }
+    const suggestion = suggestions[index] || suggestions[0];
+    if (suggestion) {
+      handleSelectSuggestion(suggestion.text);
+    }
+  }, [suggestions, handleSelectSuggestion]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSkillPicker) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveSkillIndex(prev => {
+          if (filteredSkills.length === 0) {
+            return 0;
+          }
+          return (prev + 1) % filteredSkills.length;
+        });
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveSkillIndex(prev => {
+          if (filteredSkills.length === 0) {
+            return 0;
+          }
+          return (prev - 1 + filteredSkills.length) % filteredSkills.length;
+        });
+        return;
+      }
+      if (e.key === 'Home') {
+        e.preventDefault();
+        setActiveSkillIndex(0);
+        return;
+      }
+      if (e.key === 'End') {
+        e.preventDefault();
+        setActiveSkillIndex(Math.max(filteredSkills.length - 1, 0));
+        return;
+      }
+      if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+        if (activeSkill) {
+          e.preventDefault();
+          selectSkillAndClose(activeSkill);
+          return;
+        }
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeSkillPicker();
+        return;
+      }
+    }
+
+    // Handle autocomplete navigation when suggestions are visible
+    if (hasSuggestions && autocompleteVisible) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        selectNext();
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        selectPrevious();
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const targetIndex = selectedIndex >= 0 ? selectedIndex : 0;
+        acceptSuggestionByIndex(targetIndex);
+        return;
+      }
+      if (e.key === 'ArrowRight' && isCaretAtMessageEnd()) {
+        if (inlineSuggestion && activeSuggestion) {
+          e.preventDefault();
+          handleSelectSuggestion(activeSuggestion.text);
+          return;
+        }
+        if (selectedIndex >= 0) {
+          e.preventDefault();
+          acceptSuggestionByIndex(selectedIndex);
+          return;
+        }
+      }
+      if (e.key === 'Enter' && selectedIndex >= 0) {
+        e.preventDefault();
+        acceptSuggestionByIndex(selectedIndex);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        clearSuggestions();
+        return;
+      }
+    }
+
+    // Normal Enter handling (submit message)
+    if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  };
+
+  const handleVoiceToggle = () => {
+    if (isListening) {
+      stopListening();
+    } else {
+      clearSuggestions();
+      startListening();
+    }
+  };
+
+  const handleVoiceResponseToggle = () => {
+    const enabling = !settings.voiceEnabled;
+    updateSettings({ voiceEnabled: enabling });
+
+    // Unlock AudioContext immediately while still inside the tap gesture.
+    // Mobile browsers require AudioContext creation/resume within a user
+    // gesture handler — deferring to a later event often loses the context.
+    if (enabling) {
+      audioStreamManager.enableAudio();
+    }
+  };
+
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!uploadFeatureEnabled || !isFocused || !isFileSupported || isInputDisabled) {
+      return;
+    }
+
+    const clipboardData = e.clipboardData;
+    if (!clipboardData || !clipboardData.items) {
+      return;
+    }
+
+    const items = Array.from(clipboardData.items);
+    const fileItems = items.filter(item => item.kind === 'file');
+
+    if (fileItems.length === 0) {
+      return;
+    }
+
+    const filesFromClipboard: File[] = [];
+    fileItems.forEach((item, index) => {
+      const file = item.getAsFile();
+      if (file) {
+        filesFromClipboard.push(prepareClipboardFile(file, index));
+      }
+    });
+
+    if (filesFromClipboard.length === 0) {
+      return;
+    }
+
+    e.preventDefault();
+    setPasteError(null);
+    setUploadSuccessMessage(null);
+
+    let pasteConversationId: string | null = null;
+
+    try {
+      const pasteStore = useChatStore.getState();
+      const currentConv = pasteStore.conversations.find(conv => conv.id === pasteStore.currentConversationId);
+      const currentFiles = currentConv?.attachedFiles || [];
+      const projectedConversationFileCount = currentFiles.length + filesFromClipboard.length;
+
+      if (projectedConversationFileCount > AppConfig.maxFilesPerConversation) {
+        if (isGuest) {
+          useLoginPromptStore.getState().openLoginPrompt(
+            `You've reached the guest limit of ${AppConfig.maxFilesPerConversation} files per conversation. Sign in to upload more files.`
+          );
+        }
+        throw new Error(`Maximum ${AppConfig.maxFilesPerConversation} files allowed per conversation. Please remove some files first.`);
+      }
+
+      if (AppConfig.maxTotalFiles !== null) {
+        const totalFilesAcrossConversations = pasteStore.conversations.reduce(
+          (total, conv) => total + (conv.attachedFiles?.length || 0),
+          0
+        );
+        if (totalFilesAcrossConversations + filesFromClipboard.length > AppConfig.maxTotalFiles) {
+          if (isGuest) {
+            useLoginPromptStore.getState().openLoginPrompt(
+              `You've reached the guest limit of ${AppConfig.maxTotalFiles} total files. Sign in to upload more files.`
+            );
+          }
+          throw new Error(`Maximum ${AppConfig.maxTotalFiles} total files allowed across all conversations. Please remove some files from other conversations first.`);
+        }
+      }
+
+      if (!currentConv) {
+        throw new Error('Conversation not found. Please select a conversation first.');
+      }
+
+      if (!currentConv.adapterName) {
+        throw new Error('Adapter not configured for this conversation. Please select an adapter first.');
+      }
+
+      const conversationApiUrl = resolveApiUrl(currentConv.apiUrl);
+      const conversationAdapterName = currentConv.adapterName;
+      pasteConversationId = currentConv.id;
+
+      setConversationUploading(pasteConversationId, true);
+      const uploadedAttachments: FileAttachment[] = [];
+      const completionPromises: Promise<void>[] = [];
+      
+      for (let index = 0; index < filesFromClipboard.length; index++) {
+        const file = filesFromClipboard[index];
+        const fallbackName = file.name || `Clipboard file ${index + 1}`;
+        const progressKey = `${fallbackName}-${Date.now()}-${index}`;
+        
+        setPasteUploadingFiles(prev => {
+          const next = new Map(prev);
+          next.set(progressKey, {
+            filename: fallbackName,
+            progress: 0,
+            status: 'uploading'
+          });
+          return next;
+        });
+
+        const updateEntry = (progress: FileUploadProgress) => {
+          setPasteUploadingFiles(prev => {
+            const next = new Map(prev);
+            const existing = next.get(progressKey);
+            if (!existing) {
+              return next;
+            }
+            next.set(progressKey, {
+              ...existing,
+              filename: fallbackName,
+              progress: progress.progress,
+              status: progress.status,
+              fileId: progress.fileId
+            });
+            return next;
+          });
+        };
+
+        const markEntryComplete = () => {
+          return new Promise<void>((resolve) => {
+            setPasteUploadingFiles(prev => {
+              const next = new Map(prev);
+              const existing = next.get(progressKey);
+              if (!existing) {
+                return next;
+              }
+              next.set(progressKey, {
+                ...existing,
+                progress: 100,
+                status: 'completed'
+              });
+              return next;
+            });
+            setTimeout(() => {
+              setPasteUploadingFiles(prev => {
+                const next = new Map(prev);
+                next.delete(progressKey);
+                return next;
+              });
+              resolve();
+            }, 2500);
+          });
+        };
+        debugLog(`[MessageInput] Pasting file: ${file.name}, type: ${file.type || 'unknown'}, size: ${file.size}`);
+        const uploadedAttachment = await FileUploadService.uploadFile(
+          file,
+          (progress) => {
+            debugLog(`[MessageInput] Paste upload progress for ${file.name}: ${progress.progress}% - ${progress.status}`);
+            updateEntry(progress);
+          },
+          undefined,
+          conversationApiUrl,
+          conversationAdapterName
+        );
+        uploadedAttachments.push(uploadedAttachment);
+        completionPromises.push(markEntryComplete());
+      }
+
+      if (uploadedAttachments.length > 0) {
+        let filesForSync = uploadedAttachments;
+        if (pasteConversationId && pasteConversationId === currentConversationId) {
+          const existingIds = new Set(attachedFiles.map(f => f.file_id));
+          const filteredAdds = uploadedAttachments.filter(f => !existingIds.has(f.file_id));
+          if (filteredAdds.length > 0) {
+            setAttachedFiles(prev => [...prev, ...filteredAdds]);
+            filesForSync = filteredAdds;
+          } else {
+            filesForSync = [];
+          }
+        }
+
+        if (filesForSync.length > 0) {
+          syncFilesWithConversation(filesForSync, pasteConversationId);
+        }
+
+        await Promise.all(completionPromises);
+        showUploadSuccessToast(uploadedAttachments);
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to paste file';
+      debugError('[MessageInput] Paste error:', error);
+      playSoundEffect('error', settings.soundEnabled);
+      setPasteError(errorMessage);
+      if (errorMessage.toLowerCase().includes('maximum')) {
+        setUploadError(errorMessage);
+      }
+      setTimeout(() => {
+        setPasteError(null);
+      }, 5000);
+      setPasteUploadingFiles(new Map());
+    } finally {
+      setConversationUploading(pasteConversationId, false);
+    }
+  }, [attachedFiles, currentConversationId, isFocused, isFileSupported, isGuest, isInputDisabled, setConversationUploading, settings.soundEnabled, showUploadSuccessToast, syncFilesWithConversation, uploadFeatureEnabled]);
+
+  const adapterInputPlaceholder = getAdapterInputPlaceholder(currentConversation?.adapterName);
+  const basePlaceholder = (hasProcessingFiles || isUploading)
+    ? 'Files are uploading/processing, please wait...'
+    : adapterInputPlaceholder
+    ? adapterInputPlaceholder
+    : canUseFileUploads
+    ? 'Message ORBIT or drop files here'
+    : placeholder;
+  const effectivePlaceholder = workspaceMessageLimitReached
+    ? (isGuest
+      ? `Guest limit of ${AppConfig.maxTotalMessages} messages reached. Sign in for higher limits.`
+      : `Workspace limit of ${AppConfig.maxTotalMessages} messages reached. Delete or archive old conversations to continue.`)
+    : conversationMessageLimitReached
+    ? (isGuest
+      ? `Guest limit of ${AppConfig.maxMessagesPerConversation} messages reached. Sign in for higher limits.`
+      : `This chat hit the ${AppConfig.maxMessagesPerConversation} message limit. Start a new conversation to continue.`)
+    : basePlaceholder;
+
+  const limitWarnings: string[] = [];
+  if (workspaceMessageLimitReached && AppConfig.maxTotalMessages !== null) {
+    if (isGuest) {
+      if (showLoginPrompt) {
+        limitWarnings.push(`Guest limit of ${AppConfig.maxTotalMessages} total messages reached. Sign in for higher limits, or delete conversations to start over.`);
+      }
+    } else {
+      limitWarnings.push(`Workspace limit of ${AppConfig.maxTotalMessages} total messages reached. Delete or export older conversations to continue.`);
+    }
+  }
+  if (conversationMessageLimitReached && AppConfig.maxMessagesPerConversation !== null) {
+    if (isGuest) {
+      if (showLoginPrompt) {
+        limitWarnings.push(`Guest limit of ${AppConfig.maxMessagesPerConversation} messages per conversation reached. Sign in for higher limits, or delete conversations to start over.`);
+      }
+    } else {
+      limitWarnings.push(`This conversation reached the ${AppConfig.maxMessagesPerConversation} message limit. Start a new conversation to keep chatting.`);
+    }
+  }
+  if (uploadError) {
+    limitWarnings.push(uploadError);
+  }
+
+  // Play sound when voice error appears
+  useEffect(() => {
+    if (!audioInputEnabled || !voiceError) {
+      return;
+    }
+    playSoundEffect('error', settings.soundEnabled);
+  }, [audioInputEnabled, settings.soundEnabled, voiceError]);
+
+  useEffect(() => {
+    if (!uploadError) {
+      return;
+    }
+    const timeout = setTimeout(() => setUploadError(null), 5000);
+    return () => clearTimeout(timeout);
+  }, [uploadError]);
+
+  useEffect(() => {
+    if (!(showFileUpload || isUploading || pasteUploadingFiles.size > 0 || hasAnyUploadingConversations)) {
+      return;
+    }
+    uploadPanelRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest'
+    });
+  }, [showFileUpload, isUploading, pasteUploadingFiles.size, hasAnyUploadingConversations]);
+
+  // Auto-scroll suggestions into view (needed in centered/empty-state layout)
+  useEffect(() => {
+    if (!showAutocompletePanel) {
+      return;
+    }
+    autocompletePanelRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest'
+    });
+  }, [showAutocompletePanel]);
+
+  const contentMaxWidth = maxWidthClass;
+  const containerAlignmentClasses = isCentered ? 'flex justify-center' : '';
+
+  return (
+    <>
+    <div className={`bg-transparent px-2 py-1.5 md:bg-transparent md:px-0 md:pt-4 md:pb-2 md:dark:bg-transparent sm:px-4 ${containerAlignmentClasses}`}>
+      <div className={`mx-auto w-full ${contentMaxWidth}`}>
+        {voiceError && audioInputEnabled && (
+          <div role="alert" aria-live="assertive" className="mb-2.5 w-full flex items-start gap-2.5 rounded-lg bg-red-50 dark:bg-red-950/40 px-3.5 py-2.5 animate-fadeIn">
+            <CircleAlert className="h-4 w-4 mt-0.5 flex-shrink-0 text-red-500 dark:text-red-400" />
+            <span className="text-sm text-red-700 dark:text-red-300">{voiceError}</span>
+          </div>
+        )}
+        {pasteError && (
+          <div role="alert" aria-live="assertive" className="mb-2.5 w-full flex items-start gap-2.5 rounded-lg bg-red-50 dark:bg-red-950/40 px-3.5 py-2.5 animate-fadeIn">
+            <CircleAlert className="h-4 w-4 mt-0.5 flex-shrink-0 text-red-500 dark:text-red-400" />
+            <span className="text-sm text-red-700 dark:text-red-300">{pasteError}</span>
+          </div>
+        )}
+        {uploadSuccessMessage && (
+          <div role="status" aria-live="polite" className="mb-2.5 w-full flex items-center gap-2.5 rounded-lg bg-gray-50 dark:bg-[#1f1f24] px-3.5 py-2.5 animate-fadeIn">
+            <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-100 dark:bg-emerald-900/40">
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+            </div>
+            <span className="text-sm text-[#353740] dark:text-[#ececf1]">{uploadSuccessMessage}</span>
+          </div>
+        )}
+        {limitWarnings.length > 0 && (
+          <div role="status" aria-live="polite" className="mb-2.5 w-full flex items-start gap-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 px-3.5 py-2.5 animate-fadeIn">
+            <TriangleAlert className="h-4 w-4 mt-0.5 flex-shrink-0 text-amber-500 dark:text-amber-400" />
+            <div className="flex-1 min-w-0">
+              <ul className="list-none space-y-0.5">
+                {limitWarnings.map((warning, index) => (
+                  <li key={`${warning}-${index}`} className="text-sm text-amber-800 dark:text-amber-200">{warning}</li>
+                ))}
+              </ul>
+              {isGuest && (messageLimitActive || fileLimitActive) && showLoginPrompt && (
+                <button
+                  type="button"
+                  onClick={() => useLoginPromptStore.getState().openLoginPrompt('Sign in to unlock higher message limits and more conversations.')}
+                  className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-[#353740] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#40414f] dark:bg-white dark:text-[#353740] dark:hover:bg-gray-200 transition-colors"
+                >
+                  Sign in for higher limits
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="relative w-full">
+          {/* Autocomplete suggestions are rendered below the form */}
+
+          <form onSubmit={handleSubmit} className="flex w-full flex-col gap-2 md:gap-3">
+          {/* Single-row layout: textarea + action buttons inline on all viewports */}
+          <div
+            className={`flex flex-row items-center gap-1.5 md:gap-2 rounded-xl md:rounded-lg border px-2.5 py-1.5 md:px-4 md:py-3 shadow-sm transition-all ${
+              isFocused
+                ? 'border-gray-400 shadow-md dark:border-[#3a3a3a] dark:shadow-lg'
+                : 'border-gray-300 dark:border-[#242424]'
+            } bg-gray-50 dark:bg-[#111111]`}
+          >
+          {selectedSkill && (
+            <div className="flex max-w-[45%] shrink-0 items-center gap-1.5 rounded-full border border-gray-300 bg-white px-2.5 py-1 text-xs text-gray-700 shadow-sm dark:border-[#3a3a3a] dark:bg-[#1a1a1a] dark:text-gray-200 sm:max-w-[38%] md:max-w-[32%]">
+              <Sparkles className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-gray-400" aria-hidden="true" />
+              <span className="min-w-0 truncate font-medium capitalize">
+                {selectedSkill.name.replace(/-/g, ' ')}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  clearSkill();
+                  textareaRef.current?.focus();
+                }}
+                className="-mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 dark:focus-visible:ring-gray-600"
+                aria-label="Remove skill"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          )}
+
+          {/* Textarea row */}
+          <div className="relative flex-1 w-full min-w-0">
+            {showCustomPlaceholder && effectivePlaceholder && (
+              <div
+                className="pointer-events-none absolute inset-0 truncate whitespace-nowrap text-base md:text-sm text-gray-500 dark:text-[#8e8ea0]"
+                style={{
+                  paddingTop: Math.max(textareaVerticalPadding.top - PLACEHOLDER_VERTICAL_OFFSET, 0),
+                  paddingBottom: textareaVerticalPadding.bottom,
+                  paddingLeft: `${TEXTAREA_HORIZONTAL_PADDING}px`,
+                  paddingRight: 0,
+                  lineHeight: textareaLineHeight ? `${textareaLineHeight}px` : undefined
+                }}
+                aria-hidden="true"
+              >
+                {effectivePlaceholder}
+              </div>
+            )}
+            {inlineSuggestion && isFocused && (
+              <div
+                className="pointer-events-none absolute inset-0 whitespace-pre-wrap text-base md:text-sm text-gray-400 dark:text-[#8e8ea0]"
+                style={{
+                  paddingTop: Math.max(textareaVerticalPadding.top - INLINE_SUGGESTION_VERTICAL_OFFSET, 0),
+                  paddingBottom: textareaVerticalPadding.bottom,
+                  paddingLeft: `${TEXTAREA_HORIZONTAL_PADDING}px`,
+                  paddingRight: 0,
+                  lineHeight: textareaLineHeight ? `${textareaLineHeight}px` : undefined
+                }}
+                aria-hidden="true"
+              >
+                <span className="invisible">{message}</span>
+                <span>{inlineSuggestion}</span>
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              aria-label="Message input"
+              value={message}
+              onChange={(e) => {
+                const val = e.target.value;
+                setMessage(val);
+                if (val.startsWith('/')) {
+                  setActiveSkillIndex(0);
+                }
+                setShowSkillPicker(val.startsWith('/') && skills.length > 0);
+              }}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              onCompositionStart={() => setIsComposing(true)}
+              onCompositionEnd={() => setIsComposing(false)}
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
+              placeholder={effectivePlaceholder}
+              disabled={isInputDisabled}
+              rows={1}
+              maxLength={AppConfig.maxMessageLength}
+              className="relative z-10 flex-1 w-full min-w-0 resize-none bg-transparent py-0 text-base md:text-sm text-[#353740] placeholder-transparent focus:outline-none dark:text-[#ececf1] dark:placeholder-transparent"
+              style={{
+                minHeight: '24px',
+                maxHeight: '120px',
+                paddingTop: `${textareaVerticalPadding.top}px`,
+                paddingBottom: `${textareaVerticalPadding.bottom}px`,
+                paddingLeft: `${TEXTAREA_HORIZONTAL_PADDING}px`,
+                paddingRight: 0,
+                border: 'none',
+                outline: 'none',
+                boxShadow: 'none',
+                WebkitAppearance: 'none',
+                MozAppearance: 'none',
+                appearance: 'none',
+                caretColor: (message.trim() || isFocused) ? 'inherit' : 'transparent'
+              }}
+            />
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex items-center justify-end gap-1 md:gap-2 flex-shrink-0">
+            <div className="flex items-center gap-1 md:gap-2">
+              {isCentered && !uploadFeatureEnabled && (
+                <div className="hidden md:block h-8 w-8 shrink-0" aria-hidden="true" />
+              )}
+              {uploadFeatureEnabled && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (!isFileUploadDisabled) {
+                      setShowFileUpload(!showFileUpload);
+                    }
+                  }}
+                  disabled={isFileUploadDisabled}
+                  onMouseEnter={() => setIsHoveringUpload(true)}
+                  onMouseLeave={() => setIsHoveringUpload(false)}
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 ${
+                    showFileUpload || visibleAttachedFiles.length > 0
+                      ? 'bg-gray-200 text-[#353740] dark:bg-[#565869] dark:text-[#ececf1]'
+                      : isFileUploadDisabled
+                      ? 'cursor-not-allowed text-gray-300 dark:text-[#6b6f7a]'
+                      : 'text-gray-500 hover:bg-gray-200 hover:text-[#353740] dark:text-[#bfc2cd] dark:hover:bg-[#565869]'
+                  }`}
+                  title={
+                    !isFileSupported
+                      ? 'File upload not supported by this adapter'
+                      : fileLimitActive && conversationFileLimitReached && AppConfig.maxFilesPerConversation !== null
+                      ? `Maximum of ${AppConfig.maxFilesPerConversation} files reached in this conversation. Start a new chat to upload more.`
+                      : fileLimitActive && workspaceFileLimitReached && AppConfig.maxTotalFiles !== null
+                      ? `Workspace limit of ${AppConfig.maxTotalFiles} total files reached. Remove files from other conversations first.`
+                      : isInputDisabled
+                      ? 'Files are uploading/processing. Please wait...'
+                      : visibleAttachedFiles.length > 0
+                      ? `${visibleAttachedFiles.length} file(s) attached`
+                      : 'Attach files'
+                  }
+                  aria-label="Attach files"
+                >
+                  {isFileUploadDisabled && isHoveringUpload ? (
+                    <X className="h-4 w-4" />
+                  ) : (
+                    <Paperclip className="h-4 w-4" />
+                  )}
+                </button>
+              )}
+
+              {/* Character count - hidden on mobile to save space */}
+              {message.length > 0 && (
+                <div className="hidden md:block px-2 text-xs text-gray-500 dark:text-[#bfc2cd] md:min-w-[72px] md:text-right">
+                  <span className={message.length >= AppConfig.maxMessageLength ? 'text-red-600 font-semibold' : ''}>
+                    {message.length}/{AppConfig.maxMessageLength}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Right side buttons */}
+            <div className="flex items-center gap-1 md:gap-2">
+              {(audioOutputEnabled || audioInputEnabled) && (
+                <>
+                  {audioOutputEnabled && (
+                  <button
+                    type="button"
+                    onClick={handleVoiceResponseToggle}
+                    className={`hidden md:flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 ${
+                      settings.voiceEnabled
+                        ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300'
+                        : 'text-gray-500 hover:bg-gray-200 hover:text-[#353740] dark:text-[#bfc2cd] dark:hover:bg-[#565869]'
+                    }`}
+                    title={
+                      settings.voiceEnabled
+                        ? 'Voice responses enabled - Click to disable'
+                        : 'Enable voice responses (text-to-speech)'
+                    }
+                    aria-label={settings.voiceEnabled ? 'Disable voice responses' : 'Enable voice responses'}
+                  >
+                    {settings.voiceEnabled ? (
+                      <Volume2 className="h-5 w-5" />
+                    ) : (
+                      <VolumeX className="h-5 w-5" />
+                    )}
+                  </button>
+                  )}
+                  {voiceRecordingAvailable && (
+                    <button
+                      type="button"
+                      onClick={handleVoiceToggle}
+                      disabled={isInputDisabled}
+                      onMouseEnter={() => setIsHoveringMic(true)}
+                      onMouseLeave={() => setIsHoveringMic(false)}
+                      className={`hidden md:flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 ${
+                        isListening
+                          ? '!flex bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-300'
+                          : isInputDisabled
+                          ? 'cursor-not-allowed text-gray-300 dark:text-[#6b6f7a]'
+                          : 'text-gray-500 hover:bg-gray-200 hover:text-[#353740] dark:text-[#bfc2cd] dark:hover:bg-[#565869]'
+                      }`}
+                      title={
+                        isInputDisabled
+                          ? 'Files are uploading/processing. Please wait...'
+                          : isListening
+                          ? 'Stop recording'
+                          : 'Start voice input'
+                      }
+                      aria-label={isListening ? 'Stop recording' : 'Start voice input'}
+                    >
+                      {isListening || (isInputDisabled && isHoveringMic) ? (
+                        <MicOff className="h-5 w-5" />
+                      ) : (
+                        <Mic className="h-5 w-5" />
+                      )}
+                    </button>
+                  )}
+                </>
+              )}
+
+              {adapterNotes && (
+                <button
+                  type="button"
+                  onClick={() => setShowAgentInfo(true)}
+                  className="hidden md:flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 text-gray-500 hover:bg-gray-200 hover:text-[#353740] dark:text-[#bfc2cd] dark:hover:bg-[#565869]"
+                  title="About this agent"
+                  aria-label="About this agent"
+                >
+                  <CircleHelp className="h-5 w-5" />
+                </button>
+              )}
+
+              {(hasProcessingFiles || isUploading) && (
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-gray-500 dark:text-[#bfc2cd]" />
+                </div>
+              )}
+
+              {isLoading ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    stopStreaming();
+                  }}
+                  className="flex h-9 w-9 md:h-8 md:w-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 bg-red-500 text-white hover:bg-red-600 dark:bg-red-600 dark:hover:bg-red-700"
+                  title="Stop generating"
+                  aria-label="Stop generating"
+                >
+                  <Square className="h-4 w-4 md:h-3 md:w-3 fill-current" />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={!hasTypedMessage || isInputDisabled || isComposing}
+                  className={`flex h-9 w-9 md:h-8 md:w-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 ${
+                    hasTypedMessage && !isInputDisabled && !isComposing
+                      ? 'bg-black text-white hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200'
+                      : 'bg-gray-300 text-gray-500 dark:bg-[#565869] dark:text-[#6b6f7a]'
+                  }`}
+                  title="Send message"
+                  aria-label="Send message"
+                >
+                  <ArrowUp className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {visibleAttachedFiles.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {visibleAttachedFiles.map((file) => {
+              const isProcessing = !file.processing_status ||
+                file.processing_status === 'processing' ||
+                file.processing_status === 'uploading';
+              const isFailed = file.processing_status === 'failed' || file.processing_status === 'error';
+              return (
+                <div
+                  key={file.file_id}
+                  className={`flex items-center gap-2 rounded-md border px-2 py-1 text-xs ${
+                    isFailed
+                      ? 'border-red-200 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30'
+                      : 'border-gray-200 bg-white dark:border-[#4a4b54] dark:bg-[#2d2f39]'
+                  }`}
+                  title={isFailed ? (file.error_message || 'File processing failed') : undefined}
+                >
+                  {isProcessing && (
+                    <Loader2 className="h-3 w-3 animate-spin text-blue-500 dark:text-blue-400 flex-shrink-0" />
+                  )}
+                  {isFailed && (
+                    <CircleAlert className="h-3 w-3 text-red-500 dark:text-red-400 flex-shrink-0" />
+                  )}
+                  <span className={`truncate max-w-[150px] ${
+                    isFailed
+                      ? 'text-red-700 dark:text-red-300'
+                      : 'text-[#353740] dark:text-[#ececf1]'
+                  }`}>
+                    {file.filename}
+                  </span>
+                  {isProcessing && (
+                    <span className="text-xs text-gray-500 dark:text-[#bfc2cd]">
+                      {file.processing_status === 'uploading' ? 'Uploading...' : 'Processing...'}
+                    </span>
+                  )}
+                  {isFailed && (
+                    <span className="text-xs text-red-500 dark:text-red-400">Failed</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isFailed) {
+                        // Failed files: dismiss immediately without confirmation
+                        if (currentConversationId) {
+                          removeFileFromConversation(currentConversationId, file.file_id);
+                        }
+                        setAttachedFiles(prev => prev.filter(f => f.file_id !== file.file_id));
+                      } else {
+                        openFileDeleteConfirmation(file);
+                      }
+                    }}
+                    className="rounded p-2 md:p-0.5 text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-[#bfc2cd] dark:hover:bg-red-900/30 dark:hover:text-red-300"
+                    title={isFailed ? 'Dismiss' : 'Remove file'}
+                  >
+                    <X className="h-4 w-4 md:h-3 md:w-3" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {uploadFeatureEnabled && (isFileSupported || hasAnyUploadingConversations) && (
+          <div
+            ref={uploadPanelRef}
+            className={`rounded-lg border border-gray-200/80 bg-white p-2.5 dark:border-[#3c3f4a] dark:bg-[#2a2b32] transition-all duration-200 ${
+              !showFileUpload && !isUploading && pasteUploadingFiles.size === 0 && !hasAnyUploadingConversations
+                ? 'hidden'
+                : ''
+            }`}
+          >
+            {showFileUpload && (
+              <div className="mb-2 flex items-center justify-between px-1">
+                <span className="text-xs font-medium text-gray-500 dark:text-[#8e8ea0] uppercase tracking-wider">Attach files</span>
+                <button
+                  type="button"
+                  onClick={() => setShowFileUpload(false)}
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:text-[#6b6f7a] dark:hover:bg-[#3c3f4a] dark:hover:text-[#bfc2cd] transition-colors"
+                  title="Close"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+            {(isUploading || pasteUploadingFiles.size > 0) && !showFileUpload && pasteUploadingFiles.size === 0 && (
+              <div className="mb-2 px-1">
+                <span className="text-xs font-medium text-gray-500 dark:text-[#8e8ea0] uppercase tracking-wider">Uploading files</span>
+              </div>
+            )}
+            {pasteUploadingFiles.size > 0 && (
+              <div className="mb-2 space-y-1.5">
+                {Array.from(pasteUploadingFiles.entries()).map(([key, progress]) => (
+                  <div
+                    key={key}
+                    className="group relative w-full flex items-center gap-3 rounded-lg px-3 py-2.5 bg-gray-50 dark:bg-[#1f1f24] overflow-hidden transition-colors"
+                  >
+                    <div
+                      className="absolute inset-0 bg-blue-50 dark:bg-blue-900/15 transition-all duration-500 ease-out rounded-lg"
+                      style={{ width: `${progress.progress ?? 0}%` }}
+                    />
+                    <div className="relative flex items-center gap-3 w-full min-w-0">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-100 dark:bg-blue-900/30">
+                        <Loader2 className="h-4 w-4 text-blue-600 dark:text-blue-400 animate-spin" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-[#353740] dark:text-[#ececf1] truncate">
+                          {progress.filename}
+                        </p>
+                        <div className="mt-1 flex items-center gap-2">
+                          <div className="flex-1 bg-gray-200 dark:bg-[#3c3f4a] rounded-full h-1">
+                            <div
+                              className="bg-blue-500 dark:bg-blue-400 h-1 rounded-full transition-all duration-500 ease-out"
+                              style={{ width: `${progress.progress ?? 0}%` }}
+                            />
+                          </div>
+                          <span className="text-[11px] tabular-nums text-gray-400 dark:text-[#8e8ea0] shrink-0">
+                            {Math.round(progress.progress ?? 0)}%
+                          </span>
+                        </div>
+                      </div>
+                      <span className="text-xs font-medium text-gray-500 dark:text-[#bfc2cd] shrink-0">
+                        {progress.status === 'uploading'
+                          ? 'Uploading'
+                          : progress.status === 'processing'
+                          ? 'Processing'
+                          : progress.status === 'completed'
+                          ? 'Done'
+                          : 'Pending'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/*
+              Keep FileUpload mounted while uploads are in progress so progress bars stay visible
+              even if the widget was auto-hidden after selecting files.
+            */}
+            <div className={`${showFileUpload || isUploading ? 'block max-h-[40vh] overflow-y-auto' : 'hidden'}`} aria-hidden={!(showFileUpload || isUploading)}>
+              <FileUpload
+                conversationId={currentConversationId}
+                onFilesSelected={handleFilesSelected}
+                onUploadError={(error) => {
+                  debugError('File upload error:', error);
+                  setUploadError(error);
+                }}
+                onUploadingChange={setConversationUploading}
+                onUploadSuccess={handleUploadSuccessToast}
+                maxFiles={AppConfig.maxFilesPerConversation}
+                disabled={isFileUploadDisabled}
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="h-3 md:h-1">
+          {voiceRecordingAvailable && isListening && (
+            <span className="flex items-center gap-2 text-sm md:text-xs text-gray-500 dark:text-[#bfc2cd]">
+              <span className="h-2.5 w-2.5 md:h-2 md:w-2 animate-pulse rounded-full bg-red-500" />
+              Listening...
+            </span>
+          )}
+        </div>
+        </form>
+
+        {/* Skill picker panel - shown when user types / */}
+        {showSkillPicker && (
+          <div className="w-full pt-1">
+            <SkillPicker
+              skills={skills}
+              isLoading={skillsLoading}
+              selectedSkill={selectedSkill}
+              activeSkillName={activeSkill?.name}
+              query={skillQuery}
+              onActiveSkillChange={(skill) => {
+                const nextIndex = filteredSkills.findIndex(item => item.name === skill.name);
+                if (nextIndex >= 0) {
+                  setActiveSkillIndex(nextIndex);
+                }
+              }}
+              onSelect={selectSkillAndClose}
+              onClose={closeSkillPicker}
+            />
+          </div>
+        )}
+
+        {/* ChatGPT-style autocomplete suggestions below input */}
+        {showAutocompletePanel && (
+          <div ref={autocompletePanelRef} role="listbox" aria-label="Autocomplete suggestions" className="w-full pt-1">
+            {suggestions.map((suggestion, index) => {
+              const isSelected = index === selectedIndex;
+
+              return (
+                <button
+                  key={index}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  className={`flex w-full items-center gap-3 px-3 py-3 md:py-2.5 text-left text-[15px] md:text-sm transition-colors ${
+                    isSelected
+                      ? 'bg-gray-100 dark:bg-[#2d2f39]'
+                      : 'hover:bg-gray-50 dark:hover:bg-[#2d2f39]/60'
+                  }`}
+                  onClick={() => handleSelectSuggestion(suggestion.text)}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                >
+                  {renderSuggestionText(suggestion.text)}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <ConfirmationModal
+          isOpen={fileDeleteConfirmation.isOpen}
+          onClose={closeFileDeleteConfirmation}
+          onConfirm={confirmFileDelete}
+          title="Remove File"
+          message={`Are you sure you want to remove "${fileDeleteConfirmation.filename}"? This will delete the file from both the server and this conversation. This action cannot be undone.`}
+          confirmText="Remove"
+          cancelText="Cancel"
+          type="danger"
+          isLoading={fileDeleteConfirmation.isDeleting}
+        />
+        </div>
+      </div>
+    </div>
+
+    {showAgentInfo && adapterNotes && typeof document !== 'undefined' && createPortal(
+      <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm animate-fadeIn">
+        <div
+          ref={agentInfoModalRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="agent-info-title"
+          tabIndex={-1}
+          className="w-full max-w-2xl max-h-[calc(100vh-2rem)] overflow-y-auto rounded-2xl bg-white shadow-2xl transform animate-fadeIn dark:bg-gray-800"
+        >
+          <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/20 flex items-center justify-center">
+                <CircleHelp className="w-5 h-5 text-blue-500" />
+              </div>
+              <h2 id="agent-info-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                About this agent
+              </h2>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAgentInfo(false)}
+              className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              aria-label="Close"
+            >
+              <X className="w-5 h-5 text-gray-500 dark:text-gray-400" />
+            </button>
+          </div>
+          <div className="p-6">
+            <MarkdownRenderer
+              content={adapterNotes}
+              className={`message-markdown w-full min-w-0 prose prose-slate dark:prose-invert max-w-none text-sm leading-relaxed text-[#434654] dark:text-[#d7dae3] [&>:first-child]:mt-0 [&>:last-child]:mb-0 ${agentInfoForcedThemeClass}`}
+              syntaxTheme={agentInfoSyntaxTheme}
+            />
+          </div>
+          <div className="flex items-center justify-end p-6 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 rounded-b-2xl">
+            <button
+              type="button"
+              onClick={() => setShowAgentInfo(false)}
+              className="px-4 py-3 md:py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-sm hover:shadow-md"
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      </div>,
+      document.body
+    )}
+    </>
+  );
+}

@@ -1,0 +1,72 @@
+# Environment and config files
+.env
+.api_keys
+
+# Python related
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+.python-version
+.coverage
+htmlcov/
+.pytest_cache/
+dist/
+
+# Logs
+logs/
+*.log
+
+# Database files
+examples/chroma/chroma_db*
+examples/sqlite/sqlite_db* 
+
+# Model files
+*.gguf
+*.bin
+*.pt
+*.onnx
+*.safetensors
+
+# Deployment related
+.netlify/
+.vercel/
+node_modules/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# IDE specific files
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+*.db
+.vscode/launch.json
+gguf
+*.pid
+*.pickle
+*.sqlite3
+uploads/
+.next/
+yarn.lock
+package-lock.json
+sqlite_db
+.rag_history
+.gradle
+results/
+*.db-shm
+*.db-wal
+*.duckdb
+*performance_results*
+.firecrawl_cache
+.claude
+*.yaml.bak

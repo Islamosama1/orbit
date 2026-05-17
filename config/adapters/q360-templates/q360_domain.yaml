@@ -1,0 +1,12 @@
+domain:
+  name: "Q360 Services"
+  description: "Service management system with services, requests, and ratings"
+  language: "ar"
+  fallback_language: "en"
+  collections:
+    - name: "services"
+      description: "Available services offered"
+    - name: "service_requests"
+      description: "Customer service requests and their status"
+    - name: "service_ratings"
+      description: "Customer ratings and feedback for services"

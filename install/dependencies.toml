@@ -1,0 +1,306 @@
+# Orbit Server Dependencies Configuration
+# This file defines dependency profiles for different use cases
+# Start with minimal/basic and add profiles based on enabled adapters
+#
+# Usage:
+#   Minimal server (default, Ollama included): ./setup.sh
+#   Direct GGUF loading (requires C++ tools): ./setup.sh --profile llama-cpp
+#   With cloud providers: ./setup.sh --profile providers
+#   With file support: ./setup.sh --profile providers --profile files --profile embeddings
+#   Recommended default: ./setup.sh --profile default
+#   Full installation: ./setup.sh --profile all
+
+# ============================================================================
+# MINIMAL - Minimal server (supports API mode and Ollama, no direct GGUF loading)
+# ============================================================================
+[profiles.default]
+description = "Minimal server dependencies (always installed - use API mode or Ollama for chat)"
+dependencies = [
+    "numpy<2.0.0",  # Pin to NumPy 1.x for PyTorch compatibility
+    "openai>=2.30.0",
+    "anthropic>=0.89.0",
+    "cohere>=5.21.1",
+    "groq>=1.1.2",
+    "xai-sdk>=1.12.1",
+    "replicate>=1.0.7",
+    "zai-sdk>=0.2.2",
+    "deepseek>=1.0.0",
+    "mistralai>=2.3.0",
+    "openrouter>=0.8.1",
+    "together>=2.7.0",
+    "google-genai>=1.70.0",
+    "setuptools>=82.0.1",
+    "nh3>=0.3.3",
+    "pydantic>=2.12.5",
+    "jinja2>=3.1.6",
+    "PyYAML>=6.0.3",
+    "fastapi>=0.135.3",
+    "orjson>=3.11.8",
+    "uvicorn>=0.43.0",
+    "python-dotenv>=1.2.2",
+    "requests>=2.33.1",
+    "python-multipart>=0.0.23",
+    "python-json-logger>=4.1.0",
+    "aiohttp>=3.13.3",
+    "aiodns>=4.0.0",
+    "regex>=2026.4.4",
+    "markdown>=3.10.2",
+    "sseclient-py>=1.9.0",
+    "psutil>=7.2.2",
+    "websockets>=16.0",
+    "fastmcp>=3.2.0",
+    "toml>=0.10.2",
+    "rich>=14.3.3",
+    "environs>=14.0.0,<15.0.0",  # 15+ needs marshmallow>=4; langchain-community/dataclasses-json need marshmallow<4
+    "prometheus-client>=0.24.1",
+    "tqdm>=4.67.3",
+    "redis>=7.4.0",
+    "elasticsearch>=9.3.0",
+    "pymongo>=4.16.0",
+    "ollama>=0.6.1",
+    "langchain-ollama>=1.0.1",
+    "langchain-community>=0.4.1",
+    "keyring>=25.7.0",
+    "keyrings.alt>=5.0.2",
+    "Levenshtein>=0.27.3",
+    "jarowinkler==2.0.1",
+    "firecrawl-py>=4.22.0",
+    "langdetect>=1.0.9",
+    "langid>=1.1.6",
+    "pycld2>=0.42",
+    "pycountry>=24.6.1",
+    "py-toon-format>=0.1.0",
+]
+
+# ============================================================================
+# LLAMA-CPP - Direct GGUF model loading with Python bindings
+# ============================================================================
+[profiles.llama-cpp]
+description = "Direct GGUF model loading (llama-cpp-python for simple-chat adapter)"
+dependencies = [
+    "llama-cpp-python>=0.3.20",
+    "numpy<2.0.0",
+]
+
+# ============================================================================
+# VECTOR-STORES - Vector database clients
+# ============================================================================
+[profiles.vector-stores]
+description = "Vector store backends (ChromaDB, Pinecone, Qdrant, etc.)"
+dependencies = [
+    "chromadb>=1.5.5",
+    "pinecone>=8.1.1",
+    "qdrant-client>=1.17.1",
+    "faiss-cpu>=1.13.2",
+    "weaviate-client>=4.20.4",
+    "pymilvus>=2.6.11",
+    "marqo>=3.18.0",
+    "pgvector>=0.4.2",
+]
+
+# ============================================================================
+# DATABASES - SQL and NoSQL database connectors
+# ============================================================================
+[profiles.databases]
+description = "Database connectors (PostgreSQL, MongoDB, MySQL, etc.)"
+dependencies = [
+    "motor>=3.7.1",
+    "psycopg[binary,pool]>=3.3.3",
+    "oracledb>=3.4.2",
+    "mysql-connector-python>=9.6.0",
+    "pymssql>=2.3.13",
+    "cassandra-driver>=3.29.3",
+    "duckdb>=1.5.1",
+    "pyathena>=3.30.1",
+]
+
+# ============================================================================
+# FILES - File processing (PDF, DOCX, images, etc.)
+# ============================================================================
+[profiles.files]
+description = "File processing for document Q&A (PDF, DOCX, PPTX, XLSX, CSV, VTT, images)"
+dependencies = [
+    "pypdf>=6.9.2",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
+    "openpyxl>=3.1.5",
+    "webvtt-py>=0.5.1",
+    "pandas>=2.1.4",
+    "beautifulsoup4>=4.14.3",
+    "python-magic>=0.4.27",
+    "filetype>=1.2.0",
+    # Docling layout uses RT-DETR (torch+torchvision). Floor matches docling; no PyPI x86_64 Mac wheels above torch 2.2.2.
+    "torch>=2.2.2,<3.0.0",
+    "torchvision>=0.17.0,<1",
+    "docling>=2.84.0",
+    "markitdown[all]>=0.1.5",
+    "pyarrow>=23.0.1",
+    "ftfy>=6.3.1",
+    "unidecode>=1.4.0",
+]
+
+# ============================================================================
+# sentence-transformers
+# ============================================================================
+[profiles.sentence-transformers]
+description = "For vector search using sentence transformers"
+dependencies = [
+    "sentence-transformers>=5.1.2",
+]
+
+# ============================================================================
+# AUDIO - Audio processing (Whisper, TTS, etc.)
+# ============================================================================
+[profiles.audio]
+description = "Audio processing (Whisper transcription, TTS)"
+dependencies = [
+    "openai-whisper>=20231117",
+    "snac>=1.2.1",  # SNAC codec for Orpheus TTS audio token decoding
+    "sphn>=0.2.1" # Used by personaplex adapters
+]
+
+# ============================================================================
+# TORCH - PyTorch and Hugging Face inference (no vLLM; use profile vllm for vLLM)
+# ============================================================================
+# Without vLLM we can use newer torch/transformers. For vLLM direct mode use --profile vllm.
+[profiles.torch]
+description = "PyTorch and Hugging Face inference (transformers, accelerate; GPU recommended)"
+dependencies = [
+    "numpy<2.0.0",  # Pin to NumPy 1.x for compatibility with PyTorch
+    # Same range as docling/files: Apple Silicon gets current torch; Intel macOS is capped at last PyPI wheel (2.2.2).
+    "torch>=2.2.2,<3.0.0",
+    "torchvision>=0.17.0,<1",
+    "transformers>=4.56.0",
+    "accelerate>=0.27.2",
+    "sentencepiece>=0.2.0",
+    "protobuf>=5.27.2,<6.0.0",
+    "safetensors>=0.4.0",  # Fast, safe model loading (HF models)
+    "huggingface_hub>=0.26.0",  # Model download and HF Inference API client
+]
+
+# ============================================================================
+# VLLM - vLLM server and direct model loading (pins torch==2.5.1)
+# ============================================================================
+[profiles.vllm]
+description = "vLLM for local model inference (pins PyTorch 2.5.1; use with or without profile torch)"
+dependencies = [
+    "numpy<2.0.0",
+    "torch==2.5.1",  # Required by vLLM 0.6.x; do not upgrade without checking vLLM compatibility
+    "vllm>=0.6.4",
+]
+
+# ============================================================================
+# BITNET - BitNet 1.58-bit LLM inference framework
+# ============================================================================
+[profiles.bitnet]
+description = "BitNet 1.58-bit LLM inference framework (requires building from source)"
+dependencies = [
+    # BitNet requires building from source - see docs/bitnet-setup.md
+    "cmake>=3.15.0",
+    "ninja>=1.10.0",
+    "pybind11>=2.10.0",
+    # Note: bitnet-cpp package is not available on PyPI yet
+    # Users must build from: https://github.com/microsoft/BitNet
+]
+
+# ============================================================================
+# CLOUD-SERVICES - Cloud platform services (AWS, Azure, GCP, IBM)
+# ============================================================================
+[profiles.cloud-services]
+description = "Cloud platform services (AWS, Azure, GCP, IBM Watson)"
+dependencies = [
+    "boto3>=1.42.24",
+    "azure-ai-inference>=1.0.0b9",
+    "google-cloud-aiplatform>=1.133.0",
+    "ibm-watsonx-ai>=1.4.11"
+]
+
+# ============================================================================
+# DEVELOPMENT - Development and testing tools
+# ============================================================================
+[profiles.development]
+description = "Development and testing dependencies"
+dependencies = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
+    "black>=26.3.1",
+    "flake8>=7.3.0",
+    "mypy>=2.1.0",
+    "faker>=40.18.0",
+    "pre-commit>=4.6.0",
+    "locust>=2.44.0",
+    "reportlab>=4.5.1",
+    "twine>=6.2.0",
+    "build>=1.4.0",
+    "ruff>=0.15.13",
+    "memray>=1.19.3"
+]
+
+# ============================================================================
+# ALL - Everything (full installation)
+# ============================================================================
+[profiles.all]
+description = "All available dependencies (full installation)"
+extends = [
+    "default",
+    "development",
+    "vector-stores",
+    "databases",
+    "files",
+]
+dependencies = []
+
+# ============================================================================
+# PROFILE USAGE EXAMPLES
+# ============================================================================
+# 
+# Minimal server (default, use Ollama for local inference):
+#   ./setup.sh
+#   Note: Ollama is included by default - simplest option for new users
+#
+# Direct GGUF loading (for simple-chat adapter with local models):
+#   ./setup.sh --profile llama-cpp
+#   Note: Requires C++ build tools - use Ollama if you want simpler setup
+#
+# Recommended default (minimal + providers, Ollama included):
+#   ./setup.sh --profile default
+#
+# Minimal + cloud providers:
+#   ./setup.sh --profile providers
+#
+# Minimal + file support (for simple-chat-with-files adapter):
+#   ./setup.sh --profile providers --profile files --profile sentence-transformers --profile vector-stores
+#
+# Hugging Face inference only (newer torch + transformers, no vLLM):
+#   ./setup.sh --profile torch
+#
+# vLLM direct mode (pins torch 2.5.1; combine with default, not with torch for same env):
+#   ./setup.sh --profile vllm
+#
+# With vector stores (if using ChromaDB, Pinecone, etc.):
+#   ./setup.sh --profile vector-stores
+#
+# With databases (if using SQL/NoSQL adapters):
+#   ./setup.sh --profile databases
+#
+# Full installation (everything):
+#   ./setup.sh --profile all
+#
+# Custom combination example:
+#   ./setup.sh --profile llama-cpp --profile providers --profile files --profile vector-stores
+#
+# Profile selection based on enabled adapters in default-config:
+#   - simple-chat (Ollama): default (no additional profiles needed)
+#   - simple-chat (direct GGUF): default + llama-cpp
+#   - simple-chat-with-files: default + files + embeddings + vector-stores
+#   - qa-sql: default + databases
+#   - intent-elasticsearch: default (elasticsearch included)
+#   - file-document-qa: default + files + embeddings + vector-stores
+#
+# llama-cpp profile (optional):
+#   - Requires C++ compiler and build tools
+#   - Use Ollama instead for simpler setup (included in default)
+#   - Use API mode: Run llama.cpp server separately, no Python bindings needed
+#
+# ============================================================================

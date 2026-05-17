@@ -1,0 +1,1349 @@
+"""
+Unified Intent SQL Retriever base class that combines intent functionality
+with database-specific implementations to reduce duplication.
+"""
+
+import logging
+import traceback
+import asyncio
+import re
+from typing import Dict, Any, List, Optional, Tuple
+
+from .base_sql_database import BaseSQLDatabaseRetriever
+from adapters.intent.adapter import IntentAdapter
+from retrievers.implementations.intent.domain.extraction import DomainParameterExtractor
+from retrievers.implementations.intent.domain.response import DomainResponseGenerator
+from retrievers.implementations.intent.domain.response.table_renderer import TableRenderer
+from retrievers.implementations.intent.template_reranker import TemplateReranker
+from retrievers.implementations.intent.template_processor import TemplateProcessor
+
+logger = logging.getLogger(__name__)
+
+
+class IntentSQLRetriever(BaseSQLDatabaseRetriever):
+    """
+    Unified base class for intent-based SQL retrievers.
+    Combines intent functionality with database operations.
+    """
+    
+    def __init__(self, config: Dict[str, Any], domain_adapter=None, datasource: Any = None, **kwargs):
+        """
+        Initialize Intent SQL retriever.
+
+        Args:
+            config: Configuration dictionary
+            domain_adapter: Optional domain adapter
+            datasource: Datasource instance from the registry
+            **kwargs: Additional arguments
+        """
+        super().__init__(config=config, datasource=datasource, **kwargs)
+
+        # Get intent-specific configuration from standardized key
+        self.intent_config = config.get('adapter_config', {})
+
+        # Context table format from capabilities section (None = default pipe-separated)
+        self.context_format = config.get('capabilities', {}).get('context_format')
+        logger.debug("IntentSQLRetriever context_format=%s (capabilities keys: %s)", self.context_format, list(config.get('capabilities', {}).keys()))
+
+        # Override return_results from intent_config if specified (fixes default of 3 in parent class)
+        if 'return_results' in self.intent_config:
+            self.return_results = self.intent_config.get('return_results')
+            logger.info(f"Intent SQL retriever: return_results set to {self.return_results} from adapter config")
+        else:
+            logger.info(f"Intent SQL retriever: using default return_results={self.return_results} from parent class")
+
+        # Store configuration for vector store
+        self.store_name = self.intent_config.get('store_name')
+        if not self.store_name:
+            raise ValueError("store_name is required in adapter configuration. Please specify a store from stores.yaml")
+        self.store_manager = None
+        
+        # Create IntentAdapter if not provided
+        if not domain_adapter:
+            domain_adapter = IntentAdapter(
+                domain_config_path=self.intent_config.get('domain_config_path'),
+                template_library_path=self.intent_config.get('template_library_path'),
+                confidence_threshold=self.intent_config.get('confidence_threshold', 0.75),
+                config=self.intent_config
+            )
+        
+        self.domain_adapter = domain_adapter
+        
+        # Intent-specific settings
+        self.template_collection_name = self.intent_config.get('template_collection_name', 'intent_query_templates')
+        self.confidence_threshold = self.intent_config.get('confidence_threshold', 0.1)
+        self.max_templates = self.intent_config.get('max_templates', 5)
+        
+        # Debug configuration values
+        logger.debug(f"Intent config loaded - confidence_threshold: {self.confidence_threshold}, template_collection_name: {self.template_collection_name}, max_templates: {self.max_templates}")
+        logger.debug(f"Intent config keys: {list(self.intent_config.keys())}")
+        
+        # Initialize service clients
+        self.embedding_client = None
+        self._embedding_reinit_lock = asyncio.Lock()
+        self.inference_client = None
+        self.store_manager = None
+        self.template_store = None
+        
+        # Domain-aware components
+        self.parameter_extractor = None
+        self.response_generator = None
+        self.template_reranker = None
+        self.template_processor: Optional[TemplateProcessor] = None
+    
+    def _get_store_config(self) -> Dict[str, Any]:
+        """Get store configuration from stores.yaml based on store_name."""
+        if not self.store_manager or not self.store_manager._config:
+            raise ValueError(f"Store manager not initialized. Cannot retrieve store configuration for '{self.store_name}'")
+
+        # Get vector stores configuration
+        vector_stores = self.store_manager._config.get('vector_stores', {})
+
+        # Find the store configuration
+        if self.store_name not in vector_stores:
+            raise ValueError(f"Store '{self.store_name}' not found in stores.yaml configuration")
+
+        store_config = vector_stores[self.store_name]
+        if not store_config.get('enabled', True):
+            raise ValueError(f"Store '{self.store_name}' is disabled in stores.yaml configuration")
+
+        # Get connection params and other settings directly from store config
+        connection_params = store_config.get('connection_params', {}).copy()
+
+        # Add collection name to connection params
+        connection_params['collection_name'] = self.template_collection_name
+
+        return {
+            'type': self.store_name,
+            'connection_params': connection_params,
+            'pool_size': store_config.get('pool_size', 5),
+            'timeout': store_config.get('timeout', 30),
+            'ephemeral': connection_params.get('ephemeral', False),
+            'auto_cleanup': store_config.get('auto_cleanup', True)
+        }
+    
+    async def initialize(self) -> None:
+        """Initialize intent-specific features and database connection."""
+        try:
+            logger.info(f"Initializing {self.__class__.__name__} for intent-based queries")
+
+            # Ensure datasource is initialized (connection will be obtained automatically via property)
+            await self._ensure_datasource_initialized()
+            
+            # Initialize embedding client
+            await self._initialize_embedding_client()
+            
+            # Initialize inference client
+            await self._initialize_inference_client()
+            
+            # Initialize vector store for template storage
+            await self._initialize_vector_store()
+            
+            # Load templates into vector store
+            await self._load_templates()
+            
+            # Initialize domain-aware components
+            domain_config = self.domain_adapter.get_domain_config()
+
+            # Get domain strategy once for all components
+            from ..implementations.intent.domain_strategies.registry import DomainStrategyRegistry
+            from ..implementations.intent.domain import DomainConfig
+
+            # Ensure domain_config is a DomainConfig object
+            if isinstance(domain_config, dict):
+                domain_config = DomainConfig(domain_config)
+
+            domain_strategy = DomainStrategyRegistry.get_strategy(
+                domain_config.domain_name,
+                domain_config,
+            )
+
+            # Pass the domain_strategy to avoid redundant registry lookups
+            self.parameter_extractor = DomainParameterExtractor(self.inference_client, domain_config, domain_strategy)
+            self.response_generator = DomainResponseGenerator(domain_config, domain_strategy)
+            self.template_reranker = TemplateReranker(domain_config, domain_strategy)
+            self.template_processor = TemplateProcessor(domain_config)
+            
+            logger.debug(f"{self.__class__.__name__} initialization complete")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize {self.__class__.__name__}: {e}")
+            logger.error(traceback.format_exc())
+            raise
+    
+    async def _initialize_embedding_client(self):
+        """Initialize embedding client with fallback support."""
+        embedding_provider = self.config.get('embedding', {}).get('provider')
+        logger.info(f"Using global embedding provider: {embedding_provider}")
+
+        # Store for re-initialization if client is closed by cache cleanup
+        self._embedding_provider = embedding_provider
+
+        from embeddings.base import EmbeddingServiceFactory
+
+        try:
+            if embedding_provider:
+                self.embedding_client = EmbeddingServiceFactory.create_embedding_service(self.config, embedding_provider)
+            else:
+                self.embedding_client = EmbeddingServiceFactory.create_embedding_service(self.config)
+            self._owns_embedding_client = False
+
+            logger.debug(
+                f"[EmbeddingTrace] Adapter embedding client resolved: "
+                f"provider={embedding_provider}, "
+                f"service_class={self.embedding_client.__class__.__name__}, "
+                f"model={getattr(self.embedding_client, 'model', 'N/A')}, "
+                f"dimensions={getattr(self.embedding_client, 'dimensions', 'N/A')}"
+            )
+
+            # Only initialize if not already initialized (singleton may be pre-initialized)
+            if not self.embedding_client.initialized:
+                await self.embedding_client.initialize()
+                logger.info(f"Successfully initialized {embedding_provider} embedding provider")
+            else:
+                logger.debug("Embedding service already initialized, skipping initialization")
+
+        except Exception as e:
+            logger.warning(f"Failed to initialize {embedding_provider}: {e}")
+            logger.info("Falling back to Ollama embedding provider")
+
+            try:
+                self._embedding_provider = 'ollama'
+                self.embedding_client = EmbeddingServiceFactory.create_embedding_service(self.config, 'ollama')
+                self._owns_embedding_client = False
+                # Only initialize if not already initialized (singleton may be pre-initialized)
+                if not self.embedding_client.initialized:
+                    await self.embedding_client.initialize()
+                    logger.info("Successfully initialized Ollama fallback embedding provider")
+                else:
+                    logger.debug("Ollama embedding service already initialized, skipping initialization")
+            except Exception as fallback_error:
+                logger.error(f"Failed to initialize fallback embedding provider: {fallback_error}")
+                raise Exception("Unable to initialize any embedding provider")
+
+    async def _ensure_embedding_client_valid(self) -> bool:
+        """
+        Ensure the embedding client is valid and ready for use.
+
+        If the underlying client was closed (e.g., by cache cleanup of another adapter),
+        re-initialize the embedding service. Uses an asyncio lock to prevent concurrent
+        re-initialization races.
+
+        Returns:
+            True if the client is valid, False if re-initialization failed
+        """
+        # Quick check without lock
+        if self.embedding_client is not None and not self._is_embedding_client_closed():
+            return True
+
+        async with self._embedding_reinit_lock:
+            # Re-check under lock
+            if self.embedding_client is not None and not self._is_embedding_client_closed():
+                return True
+
+            if self.embedding_client is None:
+                logger.warning("Intent retriever embedding client is None, reinitializing...")
+                await self._initialize_embedding_client()
+                return self.embedding_client is not None
+
+            # Client was closed, re-initialize
+            provider = getattr(self, '_embedding_provider', None) or 'unknown'
+            logger.warning(
+                f"Intent retriever's {provider} embedding client was closed "
+                f"(likely by cache cleanup of another adapter). Reinitializing..."
+            )
+
+            from embeddings.base import EmbeddingServiceFactory
+
+            try:
+                provider_to_use = self._embedding_provider or self.config.get('embedding', {}).get('provider', 'ollama')
+                factory_instances = EmbeddingServiceFactory.get_cached_instances()
+                keys_to_remove = [k for k in factory_instances.keys() if k.startswith(f"{provider_to_use}:")]
+                if keys_to_remove:
+                    with EmbeddingServiceFactory._get_lock():
+                        for key in keys_to_remove:
+                            if key in EmbeddingServiceFactory._instances:
+                                del EmbeddingServiceFactory._instances[key]
+
+                self.embedding_client = EmbeddingServiceFactory.create_embedding_service(
+                    self.config, provider_to_use
+                )
+
+                if not self.embedding_client.initialized:
+                    await self.embedding_client.initialize()
+
+                logger.info(f"Successfully reinitialized {provider_to_use} embedding client for intent retriever")
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to reinitialize embedding client: {e}")
+                return False
+
+    def _is_embedding_client_closed(self) -> bool:
+        """Check if the embedding client's underlying connection was closed."""
+        if self.embedding_client is None:
+            return True
+
+        # Google/Gemini embedding services use a lazily-created _genai_client and
+        # inherit an unused ProviderAIService.client attribute that stays None.
+        if hasattr(self.embedding_client, '_genai_client'):
+            return False
+
+        # Services that manage their own session (e.g. Voyage, OpenRouter)
+        # use self.session instead of self.client — check that first
+        if hasattr(self.embedding_client, 'session') and self.embedding_client.session is not None:
+            return False
+
+        # Services with a session_manager (e.g. Jina) handle their own lifecycle
+        if hasattr(self.embedding_client, 'session_manager'):
+            return False
+
+        # For SDK-based services, client=None means the connection was closed
+        return (
+            hasattr(self.embedding_client, 'client') and
+            self.embedding_client.client is None
+        )
+    
+    async def _initialize_inference_client(self):
+        """Initialize inference client with adapter-specific override support."""
+        from inference.pipeline.providers import UnifiedProviderFactory as ProviderFactory
+        
+        # Check if there's an inference_provider override in the config
+        # This would be set by the DynamicAdapterManager when it loads the adapter
+        inference_provider = self.config.get('inference_provider')
+        
+        if inference_provider:
+            logger.info(f"Using adapter-specific inference provider: {inference_provider}")
+            self.inference_client = ProviderFactory.create_provider_by_name(inference_provider, self.config)
+        else:
+            # Fall back to default provider
+            logger.info("Using default inference provider from config")
+            self.inference_client = ProviderFactory.create_provider(self.config)
+        
+        await self.inference_client.initialize()
+    
+    async def _initialize_vector_store(self):
+        """Initialize vector store for template storage using the StoreManager."""
+        try:
+            # Import store components
+            from vector_stores.base.store_manager import StoreManager
+            from vector_stores.services.template_embedding_store import TemplateEmbeddingStore
+            
+            # Initialize store manager if not already available
+            if not self.store_manager:
+                self.store_manager = StoreManager()
+                # Load configuration from the main config
+                if hasattr(self.config, 'get') and self.config.get('stores'):
+                    # If stores config is in main config, use it
+                    self.store_manager._config = self.config.get('stores', {})
+                else:
+                    # Try to load from stores.yaml file
+                    import yaml
+                    from pathlib import Path
+                    stores_config_path = Path('config/stores.yaml')
+                    if stores_config_path.exists():
+                        with open(stores_config_path, 'r') as f:
+                            self.store_manager._config = yaml.safe_load(f)
+                    else:
+                        raise ValueError("stores.yaml configuration file not found and no stores config in main config")
+            
+            # Get store configuration from stores.yaml
+            store_config = self._get_store_config()
+            
+            
+            logger.debug(f"Using store '{self.store_name}' with type '{store_config.get('type', 'chroma')}'")
+            
+            # Create template embedding store with store manager
+            self.template_store = TemplateEmbeddingStore(
+                store_name=f'intent_templates_{self.store_name}',
+                store_type=store_config.get('type', 'chroma'),
+                collection_name=self.template_collection_name,
+                config=store_config.get('connection_params', {}),
+                store_manager=self.store_manager
+            )
+            
+            # Initialize the template store
+            if hasattr(self.template_store, 'initialize'):
+                await self.template_store.initialize()
+                
+            # Clear existing templates if they have wrong dimensions
+            try:
+                # Get the expected dimension from current embedding client
+                test_embedding = await self.embedding_client.embed_query("test")
+                expected_dim = len(test_embedding) if test_embedding else 768
+                logger.info(f"Expected embedding dimension from current client: {expected_dim}")
+                
+                stats = await self.template_store.get_statistics()
+                existing_dim = stats.get('collection_metadata', {}).get('dimension')
+                
+                if existing_dim and existing_dim != expected_dim:
+                    logger.warning(f"Existing collection has wrong dimension ({existing_dim}), expected {expected_dim}, recreating collection")
+                    
+                    # Delete the collection entirely and recreate with correct dimension
+                    if hasattr(self.template_store, '_vector_store'):
+                        vector_store = self.template_store._vector_store
+                        collection_name = self.template_store.collection_name
+                        
+                        # Delete the collection
+                        if await vector_store.collection_exists(collection_name):
+                            await vector_store.delete_collection(collection_name)
+                            logger.info(f"Deleted collection {collection_name}")
+                        
+                        # Recreate with correct dimension
+                        await vector_store.create_collection(collection_name, dimension=expected_dim)
+                        logger.info(f"Recreated collection {collection_name} with dimension {expected_dim}")
+                        
+            except Exception as e:
+                logger.warning(f"Could not check/clear collection dimensions: {e}")
+            
+            # Set the embedding client if the store supports it
+            if hasattr(self.template_store, 'set_embedding_client'):
+                self.template_store.set_embedding_client(self.embedding_client)
+            
+            # Initialize the domain adapter embeddings if it supports it
+            if hasattr(self.domain_adapter, 'initialize_embeddings'):
+                # Pass the template store directly since we don't have a store manager
+                await self.domain_adapter.initialize_embeddings()
+            
+            logger.info(f"Initialized vector store for template collection: {self.template_collection_name}")
+            
+        except ImportError as e:
+            logger.error(f"Vector store system not available: {e}")
+            raise Exception("Intent adapter requires vector store support. Install required dependencies.") from e
+        except Exception as e:
+            logger.error(f"Error initializing vector store: {e}")
+            raise Exception(f"Intent adapter requires a properly configured vector store. Failed to initialize store '{self.store_name}'.") from e
+    
+    async def _load_templates(self):
+        """Load SQL templates from the adapter into vector store."""
+        try:
+            if not self.template_store:
+                logger.warning("Template store not initialized, skipping template loading")
+                return
+            
+            templates = self.domain_adapter.get_all_templates()
+            
+            if not templates:
+                logger.warning("No templates found in template library")
+                return
+            
+            logger.debug(f"Loading {len(templates)} templates into vector store")
+            logger.debug("=== Template Loading Debug Info ===")
+            logger.debug(f"  Store name: {self.store_name}")
+            logger.debug(f"  Collection name: {self.template_collection_name}")
+            logger.debug(f"  Template store collection: {self.template_store.collection_name}")
+            logger.debug(f"  Template store name: {self.template_store.store_name}")
+            logger.debug(f"  Template library path: {self.intent_config.get('template_library_path')}")
+            logger.debug(f"  Template IDs (first 3): {[t.get('id', 'no-id') for t in templates[:3]]}")
+            logger.debug("===================================")
+
+            # Check if we should reload templates
+            force_reload = self.intent_config.get('force_reload_templates', False)
+            reload_on_start = self.intent_config.get('reload_templates_on_start', True)
+            
+            # Also force reload if dimensions have changed
+            dimension_changed = False
+            try:
+                stats = await self.template_store.get_statistics()
+                existing_dim = stats.get('collection_metadata', {}).get('dimension')
+                test_embedding = await self.embedding_client.embed_query("test")
+                expected_dim = len(test_embedding) if test_embedding else 768
+                if existing_dim and existing_dim != expected_dim:
+                    dimension_changed = True
+                    logger.info(f"Dimension changed from {existing_dim} to {expected_dim}, forcing reload")
+            except Exception:
+                pass
+            
+            if not force_reload and not reload_on_start and not dimension_changed:
+                # Check if templates already exist
+                try:
+                    stats = await self.template_store.get_statistics()
+                    existing_count = stats.get('total_templates', 0)
+                    if existing_count > 0:
+                        logger.info(f"Found {existing_count} existing templates, skipping reload")
+                        return
+                except Exception:
+                    pass
+            
+            # Load templates into the template store
+            loaded_count = 0
+
+            # Build per-example vector entries: (vector_id, template, embedding_text)
+            # Each nl_example gets its own vector for precise matching
+            vector_entries = []
+            for template in templates:
+                if not isinstance(template, dict):
+                    continue
+                template_id = template.get('id')
+                if not template_id:
+                    continue
+                for embedding_text, suffix in self._create_example_embedding_texts(template):
+                    vector_id = f"{template_id}::{suffix}"
+                    vector_entries.append((vector_id, template, embedding_text))
+
+            embedding_texts = [entry[2] for entry in vector_entries]
+
+            # Batch generate embeddings for all example texts
+            embeddings = []
+            if embedding_texts:
+                try:
+                    logger.info(f"Generating embeddings for {len(embedding_texts)} template examples in batch "
+                               f"(from {len(templates)} templates)...")
+                    logger.debug(
+                        f"[EmbeddingTrace] embed_documents call: "
+                        f"provider={self._embedding_provider}, "
+                        f"service={self.embedding_client.__class__.__name__}, "
+                        f"model={getattr(self.embedding_client, 'model', 'N/A')}, "
+                        f"num_texts={len(embedding_texts)}"
+                    )
+                    embeddings = await self.embedding_client.embed_documents(embedding_texts)
+                    logger.info(f"Successfully generated {len(embeddings)} embeddings")
+                    if embeddings:
+                        logger.debug(
+                            f"[EmbeddingTrace] embed_documents result: "
+                            f"count={len(embeddings)}, dims={len(embeddings[0]) if embeddings[0] else 0}"
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to batch generate embeddings: {e}")
+                    logger.info("Falling back to individual embedding generation...")
+                    for text in embedding_texts:
+                        try:
+                            embedding = await self.embedding_client.embed_query(text)
+                            embeddings.append(embedding)
+                        except Exception as e2:
+                            logger.error(f"Failed to generate embedding: {e2}")
+                            embeddings.append(None)
+
+            # Prepare templates with embeddings
+            templates_with_embeddings = []
+            for (vector_id, template, _), embedding in zip(vector_entries, embeddings):
+                if embedding:
+                    template_data = {
+                        'sql': template.get('sql', ''),
+                        'description': template.get('description', ''),
+                        'category': template.get('category', 'general'),
+                        'parameters': template.get('parameters', []),
+                        'examples': template.get('nl_examples', [])
+                    }
+                    templates_with_embeddings.append((vector_id, template_data, embedding))
+            
+            # Batch add templates to the store
+            if templates_with_embeddings:
+                try:
+                    logger.debug(f"Adding {len(templates_with_embeddings)} templates with embeddings to store")
+                    results = await self.template_store.batch_add_templates(templates_with_embeddings)
+                    loaded_count = sum(1 for success in results.values() if success)
+                    logger.info(f"Successfully loaded {loaded_count} templates into vector store")
+                    
+                    # Verify the templates are actually in the store
+                    try:
+                        post_stats = await self.template_store.get_statistics()
+                        logger.debug(f"Vector store now contains {post_stats.get('total_templates', 0)} templates")
+                    except Exception as e:
+                        logger.debug(f"Could not get post-load stats: {e}")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to add templates to store: {e}")
+                    logger.error(traceback.format_exc())
+            
+            if loaded_count == 0:
+                logger.warning("No templates were loaded into vector store")
+                if templates:
+                    logger.debug(f"Found {len(templates)} templates from adapter but none were loaded")
+            else:
+                logger.info(f"Template loading complete: {loaded_count} templates loaded")
+            
+        except Exception as e:
+            logger.error(f"Error loading templates: {e}")
+            logger.error(traceback.format_exc())
+
+    async def reload_templates(self) -> Dict[str, Any]:
+        """
+        Reload templates from YAML files and re-index in vector store.
+
+        This method:
+        1. Reloads the domain adapter to re-read YAML template files from disk
+        2. Clears existing templates from the vector store collection
+        3. Re-embeds and re-indexes all templates
+
+        Returns:
+            Summary dict with templates_loaded count and other details
+        """
+        try:
+            logger.info(f"Reloading templates for collection '{self.template_collection_name}'...")
+
+            # 1. Reload domain adapter to pick up YAML changes
+            self.domain_adapter = IntentAdapter(
+                domain_config_path=self.intent_config.get('domain_config_path'),
+                template_library_path=self.intent_config.get('template_library_path'),
+                confidence_threshold=self.intent_config.get('confidence_threshold', 0.75),
+                config=self.intent_config
+            )
+
+            # Re-initialize domain-aware components with new domain config
+            domain_config = self.domain_adapter.get_domain_config()
+            from ..implementations.intent.domain import DomainConfig
+            if isinstance(domain_config, dict):
+                domain_config = DomainConfig(domain_config)
+            from ..implementations.intent.domain_strategies.registry import DomainStrategyRegistry
+            domain_strategy = DomainStrategyRegistry.get_strategy(domain_config.domain_name, domain_config)
+            self.parameter_extractor = DomainParameterExtractor(self.inference_client, domain_config, domain_strategy)
+            self.response_generator = DomainResponseGenerator(domain_config, domain_strategy)
+            self.template_reranker = TemplateReranker(domain_config, domain_strategy)
+            self.template_processor = TemplateProcessor(domain_config)
+
+            # 2. Clear existing templates from vector store
+            if self.template_store:
+                await self.template_store.clear_all_templates()
+                logger.info(f"Cleared existing templates from collection '{self.template_collection_name}'")
+
+            # 3. Re-load templates (re-embed and re-index)
+            await self._load_templates()
+
+            # 4. Get stats and return summary
+            stats = await self.template_store.get_statistics() if self.template_store else {}
+            templates_loaded = stats.get('total_templates', 0)
+
+            logger.info(f"Template reload complete: {templates_loaded} templates loaded into '{self.template_collection_name}'")
+
+            return {
+                "templates_loaded": templates_loaded,
+                "collection_name": self.template_collection_name,
+                "template_library_path": self.intent_config.get('template_library_path'),
+                "domain_config_path": self.intent_config.get('domain_config_path')
+            }
+
+        except Exception as e:
+            logger.error(f"Error reloading templates: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
+    def _create_embedding_text(self, template: Dict[str, Any]) -> str:
+        """Create text for embedding from template."""
+        # Extract only string tags (ignore dict tags which contain function metadata)
+        tags = template.get('tags', [])
+        string_tags = [tag for tag in tags if isinstance(tag, str)]
+
+        parts = [
+            template.get('description', ''),
+            ' '.join(template.get('nl_examples', [])),
+            ' '.join(string_tags)
+        ]
+        
+        param_names = [p.get('name', '').replace('_', ' ') for p in template.get('parameters', []) if p.get('name')]
+        parts.extend(param_names)
+        
+        if 'semantic_tags' in template:
+            tags = template['semantic_tags']
+            parts.append(tags.get('action', ''))
+            primary_entity = tags.get('primary_entity', '')
+            parts.append(primary_entity)
+            if tags.get('secondary_entity'):
+                parts.append(tags['secondary_entity'])
+            parts.extend(tags.get('qualifiers', []))
+            
+            domain_config = self.domain_adapter.get_domain_config()
+            if domain_config and primary_entity:
+                vocabulary = domain_config.get('vocabulary', {})
+                entity_synonyms = vocabulary.get('entity_synonyms', {})
+                if primary_entity in entity_synonyms:
+                    parts.extend(entity_synonyms[primary_entity])
+        
+        return ' '.join(filter(None, parts))
+
+    def _create_example_embedding_texts(self, template: Dict[str, Any]) -> List[Tuple[str, str]]:
+        """
+        Create per-example embedding texts for a template.
+
+        Instead of one large blob per template, each nl_example gets its own
+        focused embedding combined with short context (description + primary entity).
+        This dramatically improves match precision — exact nl_example queries
+        score 0.9+ instead of ~0.65 with the concatenated blob approach.
+
+        Returns:
+            List of (embedding_text, id_suffix) tuples.
+            The id_suffix is used to create unique vector IDs: "{template_id}::{suffix}".
+        """
+        description = template.get('description', '')
+        nl_examples = template.get('nl_examples', [])
+
+        # Build short context: description + primary entity + action
+        context_parts = [description]
+        if 'semantic_tags' in template:
+            sem = template['semantic_tags']
+            if sem.get('primary_entity'):
+                context_parts.append(sem['primary_entity'])
+            if sem.get('action'):
+                context_parts.append(sem['action'])
+        context = ' '.join(filter(None, context_parts))
+
+        texts = []
+        for i, example in enumerate(nl_examples):
+            if example and example.strip():
+                texts.append((f"{example} {context}", f"ex{i}"))
+
+        if not texts:
+            # Fallback: templates without nl_examples use the full blob
+            texts.append((self._create_embedding_text(template), "desc"))
+
+        return texts
+
+    def _create_template_metadata(self, template: Dict[str, Any]) -> Dict[str, Any]:
+        """Create metadata for ChromaDB storage."""
+        metadata = {
+            'template_id': template.get('id', ''),
+            'description': template.get('description', ''),
+            'category': template.get('category', 'general'),
+            'complexity': template.get('complexity', 'medium')
+        }
+        
+        if 'semantic_tags' in template:
+            for key, value in template['semantic_tags'].items():
+                metadata[f'semantic_{key}'] = str(value)
+        
+        return metadata
+    
+    async def get_relevant_context(self, query: str, api_key: Optional[str] = None,
+                                 collection_name: Optional[str] = None, **kwargs) -> List[Dict[str, Any]]:
+        """Process a natural language query using intent-based SQL translation."""
+        cancel_event = kwargs.pop('cancel_event', None)
+
+        try:
+            logger.debug(f"Processing intent query: {query}")
+
+            # Check cancellation before starting
+            if cancel_event and cancel_event.is_set():
+                logger.debug("Intent query cancelled before template search")
+                return []
+
+            # Find best matching template
+            templates = await self._find_best_templates(query)
+
+            if not templates:
+                logger.warning("No matching templates found")
+                return [{
+                    "content": "I couldn't find a matching query pattern for your request.",
+                    "metadata": {"source": "intent", "error": "no_matching_template"},
+                    "confidence": 0.0
+                }]
+
+            # Rerank templates using domain-specific rules
+            if self.template_reranker:
+                templates = self.template_reranker.rerank_templates(templates, query)
+
+            # Try templates in order of relevance
+            datasource_unavailable = False
+            for template_info in templates:
+                # Check cancellation between template attempts
+                if cancel_event and cancel_event.is_set():
+                    logger.debug("Intent query cancelled during template iteration")
+                    return []
+
+                template = template_info['template']
+                similarity = template_info['similarity']
+
+                if similarity < self.confidence_threshold:
+                    continue
+
+                logger.debug(f"Trying template: {template.get('id')} (similarity: {similarity:.2%})")
+
+                # Extract parameters
+                if self.parameter_extractor:
+                    parameters = await self.parameter_extractor.extract_parameters(query, template)
+                    validation_errors = self.parameter_extractor.validate_parameters(parameters)
+                    if validation_errors:
+                        logger.debug(f"Parameter validation failed for template {template.get('id')}: {validation_errors}")
+                        continue
+                else:
+                    parameters = await self._extract_parameters(query, template)
+
+                # Execute template
+                results, error = await self._execute_template(template, parameters)
+
+                if error:
+                    logger.debug(f"Template {template.get('id')} execution failed: {error}")
+                    # If the datasource itself is unavailable, stop trying more templates
+                    if 'not initialized' in error.lower() or 'connection' in error.lower():
+                        logger.warning(f"Datasource unavailable ({error}), skipping remaining templates")
+                        datasource_unavailable = True
+                        break
+                    continue
+
+                # Track original count before any truncation
+                original_result_count = len(results) if results else 0
+                was_truncated = False
+
+                if results:
+                    logger.debug(f"SQL query returned {original_result_count} rows from database")
+
+                # Apply truncation if needed
+                if results and self.return_results is not None and len(results) > self.return_results:
+                    logger.info(f"Truncating result set from {len(results)} to {self.return_results} results based on adapter config (return_results={self.return_results})")
+                    results = results[:self.return_results]
+                    was_truncated = True
+
+                # Format response using domain-aware generator
+                if self.response_generator:
+                    formatted_data = self.response_generator.format_response_data(results, template)
+
+                    # Create content string from formatted data
+                    content_parts = []
+                    if formatted_data.get("message"):
+                        content_parts.append(formatted_data["message"])
+
+                    # Add summary or table based on format
+                    if formatted_data.get("summary"):
+                        content_parts.append(formatted_data["summary"])
+                    elif formatted_data.get("table") and formatted_data["table"].get("rows"):
+                        # Format table using TableRenderer
+                        table_data = formatted_data["table"]
+                        columns = table_data["columns"]
+                        rows = table_data["rows"][:self.return_results] if self.return_results else table_data["rows"]
+
+                        table_text = TableRenderer.render(columns, rows, format=self.context_format)
+
+                        # Build query context line so the LLM knows what filters produced this data
+                        query_context = ""
+                        if parameters:
+                            param_parts = [f"{k}={v}" for k, v in parameters.items() if v is not None]
+                            if param_parts:
+                                query_context = f"Query filters: {', '.join(param_parts)}\n"
+
+                        # Show truncation status in message
+                        if was_truncated:
+                            result_message = f"{query_context}Showing {len(results)} of {original_result_count} total results (truncated):\n{table_text}"
+                        else:
+                            result_message = f"{query_context}Found {formatted_data['result_count']} results:\n{table_text}"
+
+                        content_parts.append(result_message)
+
+                    if not content_parts:
+                        # Fallback to simple result summary
+                        if was_truncated:
+                            content_parts.append(f"Query executed successfully. Showing {len(results)} of {original_result_count} total results.")
+                        else:
+                            content_parts.append(f"Query executed successfully. Found {len(results)} results.")
+
+                    content = "\n\n".join(content_parts)
+
+                    logger.debug(f"Generated content for LLM context (length: {len(content)}):\n{content}")
+                    if was_truncated:
+                        logger.debug(f"Note: LLM will only see {len(results)} of {original_result_count} records")
+
+                    return [{
+                        "content": content,
+                        "metadata": {
+                            "source": "intent",
+                            "template_id": template.get('id'),
+                            "query_intent": template.get('description', ''),
+                            "parameters_used": parameters,
+                            "formatted_data": formatted_data,
+                            "similarity": similarity,
+                            "result_count": len(results),  # Actual count passed to LLM
+                            "total_available": original_result_count,  # Total from SQL
+                            "truncated": was_truncated,  # Truncation flag
+                            "domain_aware": True
+                        },
+                        "confidence": similarity
+                    }]
+                else:
+                    # Pass original count and truncation info to fallback formatter
+                    formatted_results = self._format_sql_results(
+                        results, template, parameters, similarity,
+                        original_count=original_result_count,
+                        was_truncated=was_truncated
+                    )
+                    if formatted_results:
+                        return formatted_results
+            
+            if datasource_unavailable:
+                return [{
+                    "content": "The data source is temporarily unavailable. Please try again.",
+                    "metadata": {"source": "intent", "error": "datasource_unavailable"},
+                    "confidence": 0.0
+                }]
+
+            return [{
+                "content": "I found potential matches but couldn't extract the required information.",
+                "metadata": {"source": "intent", "error": "parameter_extraction_failed"},
+                "confidence": 0.0
+            }]
+            
+        except Exception as e:
+            logger.error(f"Error in intent-based retrieval: {e}")
+            logger.error(traceback.format_exc())
+            return [{
+                "content": "An error occurred while processing your query. Please try again.",
+                "metadata": {"source": "intent", "error": str(e)},
+                "confidence": 0.0
+            }]
+    
+    async def _find_best_templates(self, query: str) -> List[Dict[str, Any]]:
+        """Find best matching templates for the query."""
+        try:
+            if not self.template_store:
+                logger.warning("Template store not available, cannot perform similarity search")
+                return []
+            
+            # Check template store stats
+            try:
+                stats = await self.template_store.get_statistics()
+                total_templates = stats.get('total_templates', 0)
+                cached_templates = stats.get('cached_templates', 0)
+                collection_name = stats.get('collection_name', 'unknown')
+                logger.debug(f"Template store stats - total: {total_templates}, cached: {cached_templates}, collection: {collection_name}")
+            except Exception as e:
+                logger.debug(f"Could not get template store stats: {e}")
+
+            # Ensure embedding client is valid (may have been closed by cache cleanup)
+            if not await self._ensure_embedding_client_valid():
+                logger.error("Failed to ensure embedding client is valid")
+                return []
+
+            # Get query embedding
+            logger.debug(
+                f"[EmbeddingTrace] embed_query call: "
+                f"provider={self._embedding_provider}, "
+                f"service={self.embedding_client.__class__.__name__}, "
+                f"model={getattr(self.embedding_client, 'model', 'N/A')}, "
+                f"query_preview={query[:80]!r}"
+            )
+            query_embedding = await self.embedding_client.embed_query(query)
+            if not query_embedding:
+                logger.error("Failed to get query embedding")
+                return []
+
+            logger.debug(f"[EmbeddingTrace] embed_query result: {len(query_embedding)} dimensions")
+            
+            # Check dimension compatibility
+            try:
+                stats = await self.template_store.get_statistics()
+                collection_dim = stats.get('collection_metadata', {}).get('dimension')
+                if collection_dim and collection_dim != len(query_embedding):
+                    logger.error(f"Dimension mismatch: query embedding has {len(query_embedding)} dims, collection has {collection_dim} dims")
+                    logger.error("This will prevent similarity search from working. Collection needs to be recreated with matching dimensions.")
+                    return []
+            except Exception as e:
+                logger.debug(f"Could not verify dimension compatibility: {e}")
+            
+            # Debug logging for template collection isolation
+            logger.debug("=== Template Search Debug Info ===")
+            logger.debug(f"  Adapter config store_name: {self.store_name}")
+            logger.debug(f"  Template collection name: {self.template_collection_name}")
+            logger.debug(f"  Template store collection: {self.template_store.collection_name}")
+            logger.debug(f"  Template store name: {self.template_store.store_name}")
+            logger.debug(f"  Template store type: {self.template_store.store_type}")
+            logger.debug("==================================")
+
+            # Search for similar templates
+            # Use higher limit to account for multiple vectors per template (per-example indexing)
+            search_limit = self.max_templates * 3
+            search_results = await self.template_store.search_similar_templates(
+                query_embedding=query_embedding,
+                limit=search_limit,
+                threshold=self.confidence_threshold
+            )
+
+            # Deduplicate: per-example indexing means multiple vectors per template.
+            # Strip "::exN" suffix and keep the highest-scoring hit per base template.
+            if search_results:
+                seen = {}
+                for result in search_results:
+                    raw_tid = result.get('template_id', '')
+                    base_tid = raw_tid.rsplit('::', 1)[0] if '::' in raw_tid else raw_tid
+                    score = result.get('score', 0)
+                    if base_tid not in seen or score > seen[base_tid]['score']:
+                        result['template_id'] = base_tid
+                        seen[base_tid] = result
+                search_results = sorted(seen.values(), key=lambda r: r.get('score', 0), reverse=True)
+                search_results = search_results[:self.max_templates]
+
+            if search_results:
+                scores = [f"{result.get('score', 0):.3f}" for result in search_results]
+                scores_str = ", ".join(scores)
+                template_ids = [result.get('template_id', 'unknown') for result in search_results]
+                logger.debug(f"Similarity search with threshold {self.confidence_threshold} returned {len(search_results)} results with scores: [{scores_str}]")
+                logger.debug(f"Found template IDs: {template_ids[:3]}...")
+            else:
+                logger.debug(f"Similarity search with threshold {self.confidence_threshold} returned 0 results")
+
+            templates = []
+            if search_results:
+                for result in search_results:
+                    template_id = result.get('template_id')
+                    template = self.domain_adapter.get_template_by_id(template_id)
+                    if template:
+                        templates.append({
+                            'template': template,
+                            'similarity': result.get('score', 0),
+                            'embedding_text': result.get('description', '')
+                        })
+                    else:
+                        logger.warning(f"Template {template_id} not found in adapter")
+
+            # nl_example exact-match rescue: always run, even when vector search is empty
+            templates = self._rescue_by_nl_example(query, templates)
+
+            logger.debug(f"Found {len(templates)} matching templates for query")
+            return templates
+
+        except Exception as e:
+            logger.error(f"Error finding templates: {e}")
+            logger.error(traceback.format_exc())
+            return []
+
+    def _rescue_by_nl_example(self, query: str, templates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Inject templates with a very close nl_example match that vector search missed."""
+        try:
+            existing_ids = {t['template'].get('id') for t in templates}
+            query_lower = query.lower().strip()
+            query_words = set(query_lower.split())
+
+            all_templates = self.domain_adapter.get_all_templates()
+            if not all_templates:
+                return templates
+
+            for tmpl in all_templates:
+                tmpl_id = tmpl.get('id')
+                if tmpl_id in existing_ids:
+                    continue
+
+                best_sim = 0.0
+                for example in tmpl.get('nl_examples', []):
+                    example_lower = example.lower().strip()
+                    # Exact match
+                    if example_lower == query_lower:
+                        best_sim = 1.0
+                        break
+                    # Jaccard word similarity
+                    example_words = set(example_lower.split())
+                    union = query_words | example_words
+                    if union:
+                        sim = len(query_words & example_words) / len(union)
+                        best_sim = max(best_sim, sim)
+
+                if best_sim >= 0.6:
+                    # Inject with a similarity score derived from the nl_example match
+                    injected_score = min(0.95, 0.8 + best_sim * 0.15)
+                    templates.append({
+                        'template': tmpl,
+                        'similarity': injected_score,
+                        'embedding_text': '',
+                        '_rescued_by_nl_example': True,
+                    })
+                    logger.debug(
+                        f"Rescued template '{tmpl_id}' via nl_example match "
+                        f"(sim={best_sim:.2f}, injected_score={injected_score:.2f})"
+                    )
+                    existing_ids.add(tmpl_id)
+
+        except Exception as e:
+            logger.debug(f"nl_example rescue scan failed: {e}")
+
+        return templates
+
+    async def _extract_parameters(self, query: str, template: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract parameters from the query using LLM."""
+        try:
+            parameters = {}
+            required_params = template.get('parameters', [])
+            
+            if not required_params:
+                return parameters
+            
+            param_descriptions = []
+            for param in required_params:
+                param_name = param.get('name', 'unknown')
+                param_type = param.get('type', 'string')
+                param_desc = param.get('description', '')
+                desc = f"- {param_name} ({param_type}): {param_desc}"
+                if 'example' in param:
+                    desc += f" (Example: {param['example']})"
+                if 'allowed_values' in param:
+                    desc += f" - Allowed values: {', '.join(param['allowed_values'])}"
+                param_descriptions.append(desc)
+            
+            extraction_prompt = f"""Extract the following parameters from the user query.
+Return ONLY a valid JSON object with the extracted values.
+Use null for parameters that cannot be found.
+
+Parameters needed:
+{chr(10).join(param_descriptions)}
+
+User query: "{query}"
+
+JSON:"""
+            
+            response = await self.inference_client.generate(extraction_prompt)
+            
+            import re
+            import json
+            # Find the first { and try progressively smaller substrings to handle
+            # LLM responses with trailing commentary after the JSON object
+            start = response.find('{')
+            if start != -1:
+                for end in range(len(response), start, -1):
+                    try:
+                        parameters = json.loads(response[start:end])
+                        break
+                    except json.JSONDecodeError:
+                        continue
+            
+            for param in required_params:
+                # Apply default if parameter is missing or None
+                pname = param.get('name')
+                if pname and (pname not in parameters or parameters[pname] is None) and 'default' in param:
+                    parameters[pname] = param['default']
+            
+            logger.debug(f"Extracted parameters: {parameters}")
+            
+            return parameters
+            
+        except Exception as e:
+            logger.error(f"Error extracting parameters: {e}")
+            return {}
+    
+    async def _execute_template(self, template: Dict[str, Any], parameters: Dict[str, Any]) -> Tuple[List[Dict], Optional[str]]:
+        """Execute SQL template with parameters."""
+        try:
+            sql_template = template.get('sql_template', template.get('sql', ''))
+
+            if not sql_template:
+                return [], "Template has no SQL query"
+
+            formatted_parameters = parameters.copy()
+            for param_name, param_value in formatted_parameters.items():
+                if param_value and isinstance(param_value, str) and 'name' in param_name.lower() and 'LIKE' in sql_template.upper():
+                    cleaned_value = param_value.strip().strip('"').strip("'")
+                    formatted_parameters[param_name] = f"%{cleaned_value}%"
+
+            sql_query = self._process_sql_template(sql_template, formatted_parameters)
+
+            logger.debug(f"Executing SQL: {sql_query}")
+
+            # Check for different parameter formats
+            has_named_params = bool(re.search(r'%\((\w+)\)s', sql_query))
+            has_duckdb_named_params = bool(re.search(r':(\w+)', sql_query))
+            has_positional_params = '?' in sql_query
+            
+            param_list = template.get('parameters', [])
+            
+            if has_named_params:
+                # PostgreSQL-style named parameters: %(name)s
+                # Ensure all referenced parameters are in the dict (even if None)
+                param_names_in_sql = re.findall(r'%\((\w+)\)s', sql_query)
+                for param_name in param_names_in_sql:
+                    if param_name not in formatted_parameters:
+                        # Try to get from template defaults
+                        param_def = next((p for p in param_list if p.get('name') == param_name), None)
+                        if param_def and 'default' in param_def:
+                            formatted_parameters[param_name] = param_def['default']
+                        else:
+                            formatted_parameters[param_name] = None
+                # Use dict for named parameters
+                results = await self.execute_query(sql_query, formatted_parameters)
+            elif has_duckdb_named_params:
+                # DuckDB/SQLite-style named parameters: :name
+                # Ensure all referenced parameters are in the dict (even if None)
+                param_names_in_sql = re.findall(r':(\w+)', sql_query)
+                for param_name in param_names_in_sql:
+                    if param_name not in formatted_parameters:
+                        # Try to get from template defaults
+                        param_def = next((p for p in param_list if p.get('name') == param_name), None)
+                        if param_def and 'default' in param_def:
+                            formatted_parameters[param_name] = param_def['default']
+                        else:
+                            formatted_parameters[param_name] = None
+                # Use dict for named parameters (DuckDB retriever will convert :name to ?)
+                results = await self.execute_query(sql_query, formatted_parameters)
+            elif has_positional_params and param_list:
+                # SQLite-style positional parameters: ?
+                # Build tuple in order of template parameters
+                param_tuple = tuple(formatted_parameters.get(p['name'], p.get('default')) for p in param_list)
+
+                # Verify binding count matches placeholder count
+                placeholder_count = sql_query.count('?')
+                if placeholder_count != len(param_tuple):
+                    logger.warning(
+                        f"Positional parameter mismatch: SQL has {placeholder_count} placeholders "
+                        f"but {len(param_tuple)} values supplied. Template: {template.get('id', 'unknown')}"
+                    )
+
+                results = await self.execute_query(sql_query, param_tuple)
+            else:
+                # No parameters or unknown format, use the dict
+                results = await self.execute_query(sql_query, formatted_parameters)
+
+            return results, None
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Error executing template: {error_msg}")
+            return [], error_msg
+    
+    def _process_sql_template(self, sql_template: str, parameters: Dict[str, Any]) -> str:
+        """Process SQL template with parameter substitution."""
+        try:
+            if self.template_processor:
+                rendered = self.template_processor.render_sql(
+                    sql_template,
+                    parameters=parameters,
+                    preserve_unknown=False,
+                )
+                if '{{' in rendered or '{%' in rendered:
+                    logger.debug("Rendered SQL still contains unresolved delimiters: %s", rendered)
+                return rendered
+
+            def replace_if_block(match):
+                param_name = match.group(1).strip()
+                content = match.group(2)
+                
+                if param_name in parameters and parameters[param_name] is not None:
+                    return content
+                else:
+                    return ""
+            
+            pattern = r'{% *if +([^%]+) *%}(.*?){% *endif *%}'
+            processed_sql = re.sub(pattern, replace_if_block, sql_template, flags=re.DOTALL)
+
+            # Also handle {{param}} template variable substitution
+            for param_name, param_value in parameters.items():
+                if param_value is not None:
+                    processed_sql = processed_sql.replace(f'{{{{{param_name}}}}}', str(param_value))
+
+            return processed_sql.strip()
+            
+        except Exception as e:
+            logger.warning(f"Error processing SQL template: {e}")
+            return sql_template
+    
+    def _format_sql_results(self, results: List[Dict], template: Dict, parameters: Dict, similarity: float,
+                           original_count: int = None, was_truncated: bool = False) -> List[Dict[str, Any]]:
+        """Format SQL results into context documents."""
+        if not results:
+            return [{
+                "content": "No results found for your query.",
+                "metadata": {
+                    "source": "intent",
+                    "template_id": template.get('id'),
+                    "parameters_used": parameters,
+                    "similarity": similarity,
+                    "result_count": 0,
+                    "total_available": 0,
+                    "truncated": False
+                },
+                "confidence": similarity
+            }]
+
+        import json
+
+        # Set original count if not provided
+        if original_count is None:
+            original_count = len(results)
+
+        formatted_doc = self.domain_adapter.format_document(
+            raw_doc=json.dumps(results, default=str),
+            metadata={
+                "source": "intent",
+                "template_id": template.get('id'),
+                "query_intent": template.get('description', ''),
+                "parameters_used": parameters,
+                "results": results,
+                "similarity": similarity,
+                "result_count": len(results),  # Actual count passed to LLM
+                "total_available": original_count,  # Total from SQL
+                "truncated": was_truncated  # Truncation flag
+            }
+        )
+
+        formatted_doc["confidence"] = similarity
+
+        return [formatted_doc]
+    
+    async def set_collection(self, collection_name: str) -> None:
+        """
+        Set the current collection/table for intent-based queries.
+        
+        Args:
+            collection_name: Name of the table to use for SQL execution
+        """
+        if not collection_name:
+            raise ValueError("Collection name cannot be empty")
+            
+        # Set the collection name (this affects SQL execution context)
+        self.collection = collection_name
+        logger.debug(f"{self.__class__.__name__} switched to collection (table): {collection_name}")
+
+    async def close(self) -> None:
+        """
+        Close adapter-specific resources (embedding, inference, template store).
+        
+        Note: Database connections are managed by the datasource registry with
+        reference counting. They should NOT be closed here - the registry will
+        close them when the reference count reaches 0.
+        """
+        errors = []
+        
+        # DO NOT close database connection here - it's managed by datasource registry
+        # The datasource registry uses reference counting and will close the connection
+        # when all adapters using it are removed (reference count reaches 0).
+        # Closing it here would break other adapters sharing the same datasource.
+        
+        # Close embedding client
+        if self.embedding_client and getattr(self, '_owns_embedding_client', False):
+            try:
+                # Try aclose() first (httpx AsyncClient uses aclose)
+                aclose_method = getattr(self.embedding_client, 'aclose', None)
+                if aclose_method and callable(aclose_method):
+                    await aclose_method()
+                else:
+                    # Try close() method
+                    close_method = getattr(self.embedding_client, 'close', None)
+                    if close_method and callable(close_method):
+                        if asyncio.iscoroutinefunction(close_method):
+                            await close_method()
+                        else:
+                            close_method()
+            except AttributeError as e:
+                # Client doesn't have close method - this is okay, just log it
+                logger.debug(f"Embedding client {type(self.embedding_client).__name__} doesn't have close/aclose method: {e}")
+            except Exception as e:
+                errors.append(f"embedding: {e}")
+                logger.warning(f"Error closing embedding client in {self.__class__.__name__}: {e}")
+        
+        # Close inference client
+        if self.inference_client:
+            try:
+                # Try aclose() first (httpx AsyncClient uses aclose)
+                aclose_method = getattr(self.inference_client, 'aclose', None)
+                if aclose_method and callable(aclose_method):
+                    await aclose_method()
+                else:
+                    # Try close() method
+                    close_method = getattr(self.inference_client, 'close', None)
+                    if close_method and callable(close_method):
+                        if asyncio.iscoroutinefunction(close_method):
+                            await close_method()
+                        else:
+                            close_method()
+            except AttributeError as e:
+                # Client doesn't have close method - this is okay, just log it
+                logger.debug(f"Inference client {type(self.inference_client).__name__} doesn't have close/aclose method: {e}")
+            except Exception as e:
+                errors.append(f"inference: {e}")
+                logger.warning(f"Error closing inference client in {self.__class__.__name__}: {e}")
+        
+        # Close template store if it exists
+        if hasattr(self, 'template_store') and self.template_store:
+            try:
+                if hasattr(self.template_store, 'close'):
+                    if asyncio.iscoroutinefunction(self.template_store.close):
+                        await self.template_store.close()
+                    else:
+                        self.template_store.close()
+            except Exception as e:
+                errors.append(f"template_store: {e}")
+                logger.warning(f"Error closing template store in {self.__class__.__name__}: {e}")
+        
+        if errors:
+            logger.error(f"Errors closing {self.__class__.__name__}: {'; '.join(errors)}")

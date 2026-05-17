@@ -1,0 +1,45 @@
+templates:
+  - id: "list_services"
+    description: "List all available services"
+    nl_examples:
+      - "show me all services"
+      - "what services are available"
+      - "اعرض كل الخدمات"
+      - "ما هي الخدمات المتاحة"
+    collection: "services"
+    query_type: "find"
+    mongodb_query: |
+      {
+        "filter": {},
+        "limit": 50
+      }
+
+  - id: "service_requests_status"
+    description: "Get service requests and their status"
+    nl_examples:
+      - "show service requests"
+      - "what are the pending requests"
+      - "اعرض طلبات الخدمة"
+      - "ما هي الطلبات المعلقة"
+    collection: "service_requests"
+    query_type: "find"
+    mongodb_query: |
+      {
+        "filter": {},
+        "limit": 50
+      }
+
+  - id: "service_ratings"
+    description: "Get ratings and feedback for services"
+    nl_examples:
+      - "show ratings"
+      - "what is the rating for services"
+      - "اعرض التقييمات"
+      - "ما هو تقييم الخدمات"
+    collection: "service_ratings"
+    query_type: "find"
+    mongodb_query: |
+      {
+        "filter": {},
+        "limit": 50
+      }

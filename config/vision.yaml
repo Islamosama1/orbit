@@ -1,0 +1,200 @@
+# Global vision configuration
+vision:
+  provider: "ollama"  # Default vision provider: openai, gemini, anthropic, ollama, ollama_cloud
+  enabled: false        # Whether vision processing is enabled globally
+
+# Provider-specific configurations
+visions:
+  openai:
+    enabled: false
+    api_key: ${OPENAI_API_KEY}
+    api_base: "https://api.openai.com/v1"
+    model: "gpt-5.5"
+    temperature: 0.0
+    max_tokens: 1000
+    stream: false
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds (increased for slow networks)
+      total: 90000     # 90 seconds (increased to handle concurrent API calls + retries)
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2
+
+  gemini:
+    enabled: true
+    api_key: ${GOOGLE_API_KEY}
+    model: "gemini-3.1-pro-preview"
+    temperature: 0.0
+    top_p: 0.8
+    top_k: 20
+    max_tokens: 1000
+    stream: false
+    transport: "rest"  # Use REST to avoid gRPC/ALTS warnings
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds (increased for slow networks)
+      total: 90000     # 90 seconds (increased to handle concurrent API calls + retries)
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2
+
+  anthropic:
+    enabled: true
+    api_key: ${ANTHROPIC_API_KEY}
+    api_base: "https://api.anthropic.com/v1"
+    model: "claude-3-5-sonnet-20241022"
+    temperature: 0.0
+    max_tokens: 1000
+    stream: false
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds (increased for slow networks)
+      total: 90000     # 90 seconds (increased to handle concurrent API calls + retries)
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2
+
+  ollama:
+    enabled: false
+    base_url: "http://http://host.docker.internal:11434"
+    model: "qwen3-vl:8b"
+    temperature: 0.0
+    max_tokens: 1000
+    stream: false
+    think: false
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds (increased for slow networks)
+      total: 90000     # 90 seconds (increased to handle concurrent API calls + retries)
+      warmup: 60000    # 1 minute for initial warmup
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2
+
+  ollama_cloud:
+    enabled: false
+    api_key: ${OLLAMA_CLOUD_API_KEY}
+    base_url: "https://ollama.com"
+    model: "qwen3.5"
+    temperature: 0.0
+    max_tokens: 1000
+    stream: false
+    think: false
+    top_p: 0.9
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds (increased for slow networks)
+      total: 90000     # 90 seconds (increased to handle concurrent API calls + retries)
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2
+
+  vllm:
+    enabled: false
+    host: "localhost"
+    port: 8000
+    model: "llava-hf/llava-1.5-7b-hf"  # Or other multimodal model
+    temperature: 0.0
+    max_tokens: 1000
+    stream: false
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds
+      total: 90000     # 90 seconds
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2
+
+  llama_cpp:
+    enabled: false
+    # Mode: "api" (connect to a running llama-server) or "direct" (load GGUF in-process)
+    #
+    # API mode — recommended: start llama-server with a multimodal model such as:
+    #   llama-server -m models/llava-v1.5-7b-Q4_K_M.gguf \
+    #                --mmproj models/llava-v1.5-7b-mmproj-f16.gguf \
+    #                --port 8080 --ctx-size 8192
+    #
+    # Direct mode — requires llama-cpp-python and a multimodal GGUF model.
+    #   Supported chat formats: llava-1-5, llava-1-6, obsidian, llava-gemma-2, moondream
+    #   Many models also need a CLIP projector (clip_model_path).
+    mode: "api"
+
+    # API mode configuration
+    base_url: "http://localhost:8080"
+    model: "llava"  # Descriptive name — llama-server ignores it, uses whatever model was loaded
+    api_key: null
+
+    # Direct mode configuration
+    model_path: "models/llava-v1.5-7b-Q4_K_M.gguf"
+    chat_format: "llava-1-5"
+    clip_model_path: null  # Path to CLIP projector, e.g. "models/llava-v1.5-7b-mmproj-f16.gguf"
+
+    # Generation parameters
+    temperature: 0.0
+    max_tokens: 1000
+    stream: false
+
+    # Context and threading (direct mode only — server controls these in API mode)
+    n_ctx: 8192
+    n_threads: 6
+    n_gpu_layers: 0  # Set to -1 for full GPU offload (CUDA/Metal)
+    main_gpu: 0
+    tensor_split: null
+
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds
+      total: 90000     # 90 seconds
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2
+
+  cohere:
+    enabled: true
+    api_key: ${COHERE_API_KEY}
+    api_base: "https://api.cohere.ai/v2"  # Must use v2 API for vision/multimodal support
+    model: "c4ai-aya-vision-32b"  # Cohere's multimodal model
+    temperature: 0.0
+    max_tokens: 1000
+    top_p: 1.0
+    stream: false
+    # Timeout configuration
+    timeout:
+      connect: 15000   # 15 seconds (increased for slow networks)
+      total: 90000     # 90 seconds (increased to handle concurrent API calls + retries)
+    # Retry configuration
+    retry:
+      enabled: true
+      max_retries: 3
+      initial_wait_ms: 1000
+      max_wait_ms: 30000
+      exponential_base: 2

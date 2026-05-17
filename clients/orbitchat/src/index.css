@@ -1,0 +1,412 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    /* Prevent tap highlight on mobile */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html {
+    @apply text-base;
+    /* Smooth scrolling for in-page navigation */
+    scroll-behavior: smooth;
+    /* Prevent pull-to-refresh on mobile (only on the html element) */
+    overscroll-behavior-y: contain;
+  }
+
+  body {
+    @apply bg-white dark:bg-[#212121] text-[#353740] dark:text-[#ececf1];
+    line-height: 1.75;
+  }
+
+  /* Root container for proper mobile layout */
+  #root {
+    min-height: 100vh;
+    min-height: 100dvh; /* Dynamic viewport height for mobile browsers */
+    display: flex;
+    flex-direction: column;
+  }
+  
+  /* Remove all textarea borders and outlines */
+  textarea {
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+    appearance: none !important;
+  }
+  
+  textarea:focus {
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    ring: none !important;
+  }
+}
+
+@layer components {
+  .prose {
+    @apply text-slate-900 dark:text-slate-100;
+  }
+  
+  /* Assistant message styling - softer, more readable like ChatGPT */
+  .prose p {
+    @apply font-normal leading-7 text-[#353740] dark:text-[#ececf1];
+    font-size: 15px;
+    margin-top: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+  
+  .prose p:first-child {
+    margin-top: 0;
+  }
+  
+  .prose p:last-child {
+    margin-bottom: 0;
+  }
+  
+  .prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+    @apply font-semibold text-[#353740] dark:text-[#ececf1];
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+  }
+  
+  .prose h1 {
+    @apply text-2xl;
+  }
+  
+  .prose h2 {
+    @apply text-xl;
+  }
+  
+  .prose h3 {
+    @apply text-lg;
+  }
+  
+  .prose ul, .prose ol {
+    @apply my-4 ml-6;
+  }
+  
+  .prose li {
+    @apply my-2 leading-7;
+    font-size: 15px;
+  }
+  
+  .prose strong {
+    @apply font-semibold;
+  }
+  
+  .prose em {
+    @apply italic;
+  }
+  
+  .prose a {
+    @apply text-blue-600 dark:text-blue-400 underline;
+  }
+  
+  .prose pre {
+    @apply bg-gray-100 dark:bg-[#202123] text-[#353740] dark:text-[#ececf1] rounded-lg;
+  }
+  
+  .prose code {
+    @apply bg-gray-100 dark:bg-[#202123] text-[#353740] dark:text-[#ececf1] rounded px-1.5 py-0.5 text-sm font-mono;
+  }
+  
+  .prose blockquote {
+    @apply border-l-4 border-gray-200 bg-gray-50 dark:bg-[#202123] rounded-r-lg pl-6 py-4 my-4 text-[#353740] dark:text-[#ececf1];
+  }
+
+  /* Table styling for markdown content */
+  .prose table {
+    @apply border-collapse my-4 text-sm;
+    width: max-content;
+    min-width: 100%;
+    table-layout: auto;
+  }
+
+  .prose thead {
+    @apply bg-gray-100 dark:bg-[#2a2b32];
+  }
+
+  .prose th {
+    @apply px-4 py-2 text-left font-semibold text-[#353740] dark:text-[#ececf1] border border-gray-200 dark:border-[#3c3f4a];
+    min-width: 12rem;
+    white-space: nowrap;
+  }
+
+  .prose td {
+    @apply px-4 py-2 text-[#353740] dark:text-[#ececf1] border border-gray-200 dark:border-[#3c3f4a];
+    min-width: 12rem;
+    vertical-align: top;
+  }
+
+  .prose tbody tr:nth-child(even) {
+    @apply bg-gray-50 dark:bg-[#202123];
+  }
+
+  .prose tbody tr:hover {
+    @apply bg-gray-100 dark:bg-[#2a2b32];
+  }
+
+  @media (max-width: 767px) {
+    .prose th {
+      min-width: 5rem;
+      white-space: normal;
+      @apply px-2 py-1.5 text-xs;
+    }
+    .prose td {
+      min-width: 5rem;
+      @apply px-2 py-1.5 text-xs;
+    }
+  }
+}
+
+/* Agent card description clamping */
+.agent-card-description {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@media (min-width: 768px) {
+  .agent-card-description {
+    -webkit-line-clamp: 3;
+  }
+}
+
+@layer utilities {
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-slate-100 dark:bg-slate-800 rounded-full;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-300 dark:bg-slate-600 rounded-full hover:bg-slate-400 dark:hover:bg-slate-500;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-slate-400 dark:bg-slate-500;
+}
+
+/* High contrast mode adjustments */
+.high-contrast {
+  --tw-text-opacity: 1;
+  --tw-bg-opacity: 1;
+}
+
+.high-contrast .text-slate-500 {
+  @apply text-slate-700 dark:text-slate-300;
+}
+
+.high-contrast .text-slate-400 {
+  @apply text-slate-600 dark:text-slate-200;
+}
+
+.high-contrast .bg-slate-50 {
+  @apply bg-slate-100 dark:bg-slate-800;
+}
+
+/* Animation improvements */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: 200px 0; }
+}
+
+@keyframes followUpEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  75% {
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.15);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.animate-slideIn {
+  animation: slideIn 0.3s ease-out;
+}
+
+.animate-shimmer {
+  animation: shimmer 1.5s infinite;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+  background-size: 200px 100%;
+}
+
+.animate-follow-up-enter {
+  animation: followUpEnter 0.8s ease-out forwards;
+}
+
+/* Focus improvements - Remove default focus styles for custom components */
+.message-input-container:focus-within {
+  @apply outline-none;
+}
+
+/* Improved focus styles for interactive elements */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  @apply outline-none ring-1 ring-gray-400/70 dark:ring-gray-500/70 ring-offset-0;
+}
+
+/* Mobile optimizations */
+@media (max-width: 768px) {
+  .prose {
+    @apply text-sm;
+  }
+
+  body {
+    @apply text-sm;
+  }
+
+  /* Native-like touch interactions */
+  button, a, [role="button"] {
+    touch-action: manipulation;
+  }
+
+  /* Smooth momentum scrolling for all scrollable areas */
+  .overflow-y-auto, .overflow-x-auto, .overflow-auto {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  /* Hide scrollbars on mobile for cleaner look */
+  .message-list::-webkit-scrollbar,
+  .overflow-y-auto::-webkit-scrollbar {
+    display: none;
+  }
+
+  .message-list,
+  .overflow-y-auto {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Prevent double-tap zoom on interactive elements */
+  button, input, textarea, select, a {
+    touch-action: manipulation;
+  }
+
+  /* Better touch targets - minimum 44px for iOS */
+  button, [role="button"], a {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Exception for inline buttons that need to be smaller */
+  .inline-btn, button.h-8, button.h-6 {
+    min-height: auto;
+    min-width: auto;
+  }
+}
+
+/* iOS-specific fixes */
+@supports (-webkit-touch-callout: none) {
+  /* Fix for iOS input zoom */
+  input[type="text"],
+  input[type="password"],
+  input[type="email"],
+  input[type="tel"],
+  input[type="number"],
+  input[type="search"],
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  @media (min-width: 768px) {
+    input[type="text"],
+    input[type="password"],
+    input[type="email"],
+    input[type="tel"],
+    input[type="number"],
+    input[type="search"],
+    textarea,
+    select {
+      font-size: inherit !important;
+    }
+  }
+
+  /* Safe area support for bottom fixed elements */
+  .mobile-bottom-safe {
+    padding-bottom: max(env(safe-area-inset-bottom), 0.75rem);
+  }
+}
+
+/* Active state for touch feedback */
+@media (hover: none) and (pointer: coarse) {
+  button:active:not(:disabled),
+  [role="button"]:active:not(:disabled) {
+    transform: scale(0.97);
+    transition: transform 0.1s ease-out;
+  }
+
+  /* Conversation item active state */
+  .conversation-item:active {
+    @apply bg-gray-100 dark:bg-[#3c3f4a];
+  }
+
+  .prose tbody tr:active {
+    @apply bg-gray-100 dark:bg-[#2a2b32];
+  }
+}
+
+/* Minimal utility overrides intentionally left empty to avoid extra visual effects */
+
+/* Respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-delay: -1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    background-attachment: initial !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+  }
+}

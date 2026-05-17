@@ -1,0 +1,44 @@
+adapters:
+  - name: "intent-mongodb-q360"
+    enabled: true
+    type: "retriever"
+    datasource: "mongodb"
+    adapter: "intent"
+    implementation: "retrievers.implementations.intent.intent_mongodb_retriever.IntentMongoDBRetriever"
+    inference_provider: "ollama"
+    embedding_provider: "ollama"
+    embedding_model: "nomic-embed-text:latest"
+    capabilities:
+      retrieval_behavior: "always"
+      formatting_style: "clean"
+      supports_file_ids: false
+      supports_session_tracking: true
+      supports_threading: true
+      supports_autocomplete: false
+      requires_api_key_validation: true
+      context_max_tokens: 4000
+    config:
+      domain_config_path: "config/adapters/q360-templates/q360_domain.yaml"
+      template_library_path:
+        - "config/adapters/q360-templates/q360_templates.yaml"
+      template_collection_name: "intent_mongodb_q360"
+      store_name: "chroma"
+      confidence_threshold: 0.4
+      max_templates: 5
+      return_results: 50
+      database: "q360-local"
+      default_collection: "services"
+      default_limit: 100
+      max_limit: 1000
+      enable_text_search: true
+      case_insensitive_regex: true
+      base_url: "http://172.17.0.1:27017"
+    fault_tolerance:
+      operation_timeout: 15.0
+      failure_threshold: 10
+      recovery_timeout: 30.0
+      success_threshold: 5
+      max_recovery_timeout: 120.0
+      enable_exponential_backoff: true
+      max_retries: 3
+      retry_delay: 1.0

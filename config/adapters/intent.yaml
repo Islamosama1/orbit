@@ -1,0 +1,367 @@
+# Intent Retriever Adapters
+# These adapters use intent classification to generate queries from natural language
+# Supports SQL, DuckDB, PostgreSQL, Elasticsearch, MongoDB, HTTP APIs, and Firecrawl
+
+adapters:
+  # HTTP JSON API Adapter - JSONPlaceholder (Simple Testing API)
+  # This adapter uses a fake REST API for testing and debugging HTTP adapter functionality
+  # No authentication required - perfect for isolating parameter extraction issues
+  - name: "intent-http-jsonplaceholder"
+    enabled: true
+    type: "retriever"
+    datasource: "http"  # Uses HTTP datasource placeholder
+    adapter: "intent"
+    implementation: "retrievers.implementations.intent.IntentHTTPJSONRetriever"
+    inference_provider: "openai"
+    model: "gpt-5.4-mini"
+    embedding_provider: "ollama"
+    embedding_model: "nomic-embed-text:latest"
+    capabilities:
+      retrieval_behavior: "always"
+      formatting_style: "standard"
+      supports_file_ids: false
+      supports_session_tracking: false
+      supports_threading: true
+      supports_autocomplete: true  # Enable autocomplete from template nl_examples
+      requires_api_key_validation: true
+      context_format: "toon"  # Options: markdown_table, toon, csv (default: pipe-separated)
+      context_max_tokens: 8000
+      numeric_precision:
+        decimal_places: 2
+    config:
+      # Domain and template configuration
+      domain_config_path: "examples/intent-templates/http-intent-template/examples/jsonplaceholder/templates/jsonplaceholder_domain.yaml"
+      template_library_path:
+        - "examples/intent-templates/http-intent-template/examples/jsonplaceholder/templates/jsonplaceholder_templates.yaml"
+
+      # Vector store configuration for template matching
+      template_collection_name: "jsonplaceholder_http_templates"
+      store_name: "chroma"  # References stores.yaml
+
+      # Intent matching configuration
+      confidence_threshold: 0.4
+      max_templates: 5
+      return_results: 10
+      verbose: false  # Enable debug logging
+
+      # Template loading settings
+      reload_templates_on_start: false
+      force_reload_templates: false
+
+      # HTTP-specific configuration
+      base_url: "https://jsonplaceholder.typicode.com"
+      default_timeout: 30
+      enable_retries: true
+      max_retries: 3
+      retry_delay: 1.0
+
+      # No authentication required for JSONPlaceholder
+
+    # Fault tolerance settings
+    fault_tolerance:
+      operation_timeout: 30.0
+      failure_threshold: 5
+      recovery_timeout: 60.0
+      max_retries: 3
+      retry_delay: 1.0
+
+  # HTTP JSON API Adapter - Paris Open Data (Que Faire à Paris)
+  # This adapter queries the Paris city open data portal for events and activities
+  # No authentication required - public API
+  - name: "intent-http-paris-opendata"
+    enabled: true
+    type: "retriever"
+    datasource: "http"  # Uses HTTP datasource placeholder
+    adapter: "intent"
+    implementation: "retrievers.implementations.intent.IntentHTTPJSONRetriever"
+    inference_provider: "openrouter"
+    #model: "gpt-oss:20b"
+    embedding_provider: "ollama"
+    capabilities:
+      retrieval_behavior: "always"
+      formatting_style: "standard"
+      supports_file_ids: false
+      supports_session_tracking: false
+      supports_threading: true
+      supports_autocomplete: true  # Enable autocomplete from template nl_examples
+      requires_api_key_validation: true
+      context_format: "toon"  # Options: markdown_table, toon, csv (default: pipe-separated)
+      context_max_tokens: 8000
+      numeric_precision:
+        decimal_places: 2
+    config:
+      # Domain and template configuration
+      domain_config_path: "examples/intent-templates/http-intent-template/examples/paris-open-data/templates/paris_quoifaire_domain.yaml"
+      template_library_path:
+        - "examples/intent-templates/http-intent-template/examples/paris-open-data/templates/paris_quoifaire_templates.yaml"
+
+      # Vector store configuration for template matching
+      template_collection_name: "paris_opendata_http_templates"
+      store_name: "chroma"  # References stores.yaml
+
+      # Intent matching configuration
+      confidence_threshold: 0.4
+      max_templates: 5
+      return_results: 20
+      verbose: false  # Enable debug logging
+
+      # Template loading settings
+      reload_templates_on_start: false
+      force_reload_templates: false
+
+      # HTTP-specific configuration
+      base_url: "https://opendata.paris.fr"
+      default_timeout: 30
+      enable_retries: true
+      max_retries: 3
+      retry_delay: 1.0
+
+      # No authentication required for Paris Open Data
+
+    # Fault tolerance settings
+    fault_tolerance:
+      operation_timeout: 30.0
+      failure_threshold: 5
+      recovery_timeout: 60.0
+      max_retries: 3
+      retry_delay: 1.0
+
+  # Firecrawl Intent Adapter - Web Scraping with Intelligent Chunking
+  # This adapter demonstrates web scraping using Firecrawl with natural language queries
+  # Supports both cloud API (api.firecrawl.dev) and self-hosted Firecrawl deployments
+  # Features intelligent content chunking for large documents (e.g., Wikipedia articles)
+  - name: "intent-firecrawl-webscrape"
+    enabled: false
+    type: "retriever"
+    datasource: "http"  # Reuse HTTP placeholder
+    adapter: "intent"
+    implementation: "retrievers.implementations.intent.IntentFirecrawlRetriever"
+    inference_provider: "openai"
+    model: "gpt-5.4-mini"
+    embedding_provider: "ollama"  # Used for chunk ranking
+    capabilities:
+      retrieval_behavior: "always"
+      formatting_style: "standard"
+      supports_file_ids: false
+      supports_session_tracking: false
+      supports_threading: true
+      supports_autocomplete: true  # Enable autocomplete from template nl_examples
+      requires_api_key_validation: true
+      context_format: "toon"  # Options: markdown_table, toon, csv (default: pipe-separated)
+      context_max_tokens: 8000
+      numeric_precision:
+        decimal_places: 2
+    config:
+      # TESTING: Using minimal templates for validation
+      # Switch to firecrawl_domain.yaml and firecrawl_templates.yaml for full Wikipedia templates
+      domain_config_path: "examples/intent-templates/firecrawl-intent-template/examples/web-scraping/templates/firecrawl_domain.yaml"
+      template_library_path:
+        - "examples/intent-templates/firecrawl-intent-template/examples/web-scraping/templates/firecrawl_templates.yaml"
+
+      # Vector store for template matching
+      template_collection_name: "firecrawl_test_templates"  # Using test collection name
+      store_name: "chroma"
+
+      # Intent matching (lower threshold for testing)
+      confidence_threshold: 0.3
+      max_templates: 5
+      return_results: 1
+
+      # Template loading
+      reload_templates_on_start: false
+      force_reload_templates: false
+
+      # Enable verbose logging for debugging
+      verbose: true
+
+      # Firecrawl configuration
+      # For cloud API: set base_url to https://api.firecrawl.dev/v1
+      # For self-hosted: set to your instance URL
+      base_url: "https://api.firecrawl.dev/v1"
+      default_timeout: 60  # Increased for large pages
+      default_formats: ["markdown"]
+
+      # Authentication (for cloud API)
+      auth:
+        type: "bearer_token"
+        token_env: "FIRECRAWL_API_KEY"
+        header_name: "Authorization"
+        token_prefix: "Bearer"
+
+      # ========================================
+      # Content Chunking Configuration
+      # ========================================
+      # Automatically chunks large web content to prevent exceeding LLM context limits
+      # and improve response relevance through semantic search
+
+      enable_chunking: true                    # Enable/disable chunking
+      max_chunk_tokens: 4000                   # Maximum tokens per chunk (~16KB)
+      chunk_overlap_tokens: 200                # Overlap between chunks for context continuity
+      min_chunk_tokens: 500                    # Minimum chunk size
+
+      # Embedding model limits (CRITICAL: Set based on your embedding provider)
+      # OpenAI text-embedding-3-*: 8191 tokens → Use 7500 for safety
+      # OpenAI text-embedding-ada-002: 8191 tokens → Use 7500 for safety
+      # Cohere embed-english-v3.0: 512 tokens → Use 450 for safety!
+      # Jina jina-embeddings-v3: 8192 tokens → Use 7500 for safety
+      max_embedding_tokens: 7500               # Max tokens with safety buffer (accounts for estimation error)
+
+      # Chunk storage and retrieval
+      chunks_collection: "firecrawl_chunks"    # Vector store collection for chunks
+      chunk_cache_ttl_hours: 24                # Cache duration (24 hours for Wikipedia)
+
+      # Chunk ranking and selection
+      top_chunks_to_return: 3                  # Number of most relevant chunks to return
+      min_chunk_similarity: 0.3                # Minimum similarity score for chunk retrieval
+
+      # Performance benefits:
+      # - 75-90% reduction in context size
+      # - Faster response times (cached chunks retrieved in <10ms)
+      # - Better relevance (only return sections related to query)
+      # - Cost optimization (fewer tokens processed by LLM)
+      # - Automatic chunk splitting if content exceeds embedding limits
+      # ========================================
+
+    fault_tolerance:
+      operation_timeout: 60.0  # Increased for large content
+      failure_threshold: 5
+      recovery_timeout: 60.0
+      max_retries: 2
+      retry_delay: 2.0
+
+  # GraphQL Intent Adapter - SpaceX API
+  # This adapter demonstrates GraphQL query generation from natural language
+  # Uses the public SpaceX GraphQL API (no authentication required)
+  - name: "intent-graphql-spacex"
+    enabled: true
+    type: "retriever"
+    datasource: "http"  # Uses HTTP datasource placeholder
+    adapter: "intent"
+    implementation: "retrievers.implementations.intent.IntentGraphQLRetriever"
+    inference_provider: "cohere"
+    embedding_provider: "ollama"
+    embedding_model: "nomic-embed-text:latest"
+    capabilities:
+      retrieval_behavior: "always"
+      formatting_style: "standard"
+      supports_file_ids: false
+      supports_session_tracking: false
+      supports_threading: true
+      supports_autocomplete: true  # Enable autocomplete from template nl_examples
+      requires_api_key_validation: true
+      context_format: "toon"  # Options: markdown_table, toon, csv (default: pipe-separated)
+      context_max_tokens: 8000
+      numeric_precision:
+        decimal_places: 2
+    config:
+      # Domain and template configuration
+      domain_config_path: "examples/intent-templates/graphql-intent-template/examples/spacex/templates/spacex_domain.yaml"
+      template_library_path:
+        - "examples/intent-templates/graphql-intent-template/examples/spacex/templates/spacex_templates.yaml"
+
+      # Vector store configuration for template matching
+      template_collection_name: "graphql_spacex_templates"
+      store_name: "chroma"  # References stores.yaml
+
+      # Intent matching configuration
+      confidence_threshold: 0.4
+      max_templates: 5
+      return_results: 20
+
+      # Template loading settings
+      reload_templates_on_start: false
+      force_reload_templates: false
+
+      # GraphQL-specific configuration
+      base_url: "https://spacex-production.up.railway.app"
+      graphql_endpoint: "/graphql"
+      supports_introspection: true
+      default_timeout: 30
+      enable_retries: true
+      max_retries: 3
+      retry_delay: 1.0
+
+    # Fault tolerance settings
+    fault_tolerance:
+      operation_timeout: 30.0
+      failure_threshold: 5
+      recovery_timeout: 60.0
+      max_retries: 3
+      retry_delay: 1.0
+
+  # =============================================================================
+  # AGENT ADAPTER - Function Calling with Built-in Tools
+  # =============================================================================
+  # This adapter demonstrates function-calling capabilities inspired by
+  # FunctionGemma patterns. Supports built-in tools (calculator, date_time,
+  # json_transform) and HTTP-based tool calls defined in YAML templates.
+  #
+  # Key Features:
+  # - YAML-defined tools with function_schema and execution config
+  # - Configurable model for function calling (separate or same as inference)
+  # - Built-in tools for common operations
+  # - Response synthesis for natural language output
+  - name: "intent-agent-example"
+    enabled: false
+    type: "retriever"
+    datasource: "http"
+    adapter: "intent"
+    implementation: "retrievers.implementations.intent.IntentAgentRetriever"
+    
+    # Model configuration - supports both single-model and multi-model patterns
+    inference_provider: "openai"
+    model: "gpt-5.4-mini"              # Main inference model
+    embedding_provider: "ollama"
+    embedding_model: "nomic-embed-text:latest"
+    
+    capabilities:
+      retrieval_behavior: "always"
+      formatting_style: "standard"
+      supports_file_ids: false
+      supports_session_tracking: false
+      supports_threading: false
+      supports_autocomplete: true
+      requires_api_key_validation: true
+      context_format: "toon"  # Options: markdown_table, toon, csv (default: pipe-separated)
+      context_max_tokens: 8000
+      numeric_precision:
+        decimal_places: 2    
+    config:
+      # Optional: Dedicated function-calling model (FunctionGemma-style)
+      # If not set, uses main inference model for function calling
+      function_model_provider: "ollama"
+      function_model: "functiongemma"  # Uncomment to use separate function model
+      
+      # Tool/Template configuration
+      domain_config_path: "examples/intent-templates/agent-template/domain.yaml"
+      template_library_path:
+        - "examples/intent-templates/agent-template/tools.yaml"
+      
+      # Vector store for template matching
+      template_collection_name: "agent_tools"
+      store_name: "chroma"
+      confidence_threshold: 0.4
+      max_templates: 5
+      return_results: 10
+      
+      # Agent-specific settings
+      enable_builtin_tools: true   # Enable calculator, date_time, json_transform
+      function_output_format: "json"  # json or text
+      synthesize_response: true    # Generate natural language response
+      verbose: false               # Enable debug logging
+      
+      # Template loading settings
+      reload_templates_on_start: false
+      force_reload_templates: false
+      
+      # HTTP configuration (base_url required even for builtin tools)
+      base_url: "http://localhost:8080"  # Placeholder for HTTP tools
+      default_timeout: 30
+    
+    # Fault tolerance settings
+    fault_tolerance:
+      operation_timeout: 30.0
+      failure_threshold: 5
+      recovery_timeout: 60.0
+      max_retries: 3
+      retry_delay: 1.0

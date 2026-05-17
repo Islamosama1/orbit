@@ -1,0 +1,195 @@
+# OrbitChat Configuration
+# All non-secret settings. Secrets (auth credentials, adapter API keys) go in .env
+
+# ---- Agent Mode ----
+# "multi" keeps the current agent selection UI and slug-based routing.
+# "single" always uses one fixed adapter, hides agent selection, disables "Change Agent",
+# and keeps the app rooted at "/" without adapter slugs.
+agentMode:
+  mode: "multi" # "multi" | "single"
+  defaultAdapterId: "" # Required when mode is "single"
+
+# ---- Application ----
+application:
+  name: "ORBIT Chat"
+  description: "Explore ideas with ORBIT's AI copilots, share context, and build together."
+  inputPlaceholder: "Message ORBIT..."
+  settingsAboutMsg: "ORBIT Chat"
+  locale: "en-US"
+  # Optional favicon URL or local file path (absolute or relative to orbitchat.yaml).
+  # If empty, uses bundled default: /favicon.svg
+  favicon: ""
+
+# ---- SEO ----
+seo:
+  # Enable sitemap.xml generation for adapter slug routes.
+  includeSitemap: false
+  # Canonical public origin used for canonical URLs and sitemap entries.
+  # Required when includeSitemap is true.
+  siteUrl: ""
+  # Optional additional concrete origins to include in sitemap.xml.
+  # Use this for multiple real hosts like https://example.com and https://www.example.com.
+  alternateSiteUrls: []
+  # Optional wildcard host patterns allowed for runtime deployments.
+  # These are NOT expanded into sitemap.xml because sitemap entries must be concrete URLs.
+  # Example: "https://*.example.com"
+  hostPatterns: []
+  # Render each agent's notes on its slug route for search indexing.
+  exposeAgentNotes: true
+
+# ---- API ----
+
+# ---- Debug ----
+debug:
+  consoleDebug: false
+
+# ---- Features ----
+features:
+  enableUpload: false
+  enableAudioOutput: false
+  enableAudioInput: false
+  enableFeedbackButtons: false
+  enableConversationThreads: true
+  enableAutocomplete: false
+
+# ---- Voice ----
+voice:
+  silenceTimeoutMs: 4000
+  recognitionLanguage: ""
+
+# ---- Out of Service ----
+# Set to a message string to show maintenance screen; null to disable
+outOfServiceMessage: null
+
+# ---- Usage Limits ----
+limits:
+  files:
+    perConversation: 5
+    maxSizeMB: 50
+    totalFiles: 100
+  conversations:
+    maxConversations: 10
+    messagesPerConversation: 1000
+    messagesPerThread: 1000
+    totalMessages: 10000
+  messages:
+    maxLength: 1000
+
+# ---- Guest Limits (when auth is enabled and user is not signed in) ----
+guestLimits:
+  files:
+    perConversation: 1
+    maxSizeMB: 10
+    totalFiles: 2
+  conversations:
+    maxConversations: 1
+    messagesPerConversation: 10
+    messagesPerThread: 10
+    totalMessages: 10
+  messages:
+    maxLength: 500
+  # Server-side rate limiting for unauthenticated /api/* requests (per IP).
+  # Authenticated users are NOT rate-limited here (ORBIT server handles that).
+  # File uploads, adapter info, and conversation history endpoints are exempt.
+  # When this section is absent, guest rate limiting is disabled (backward compatible).
+  # rateLimit:
+  #   enabled: true
+  #   windowMs: 60000        # 1 minute window
+  #   maxRequests: 60         # max requests per window per IP
+  #   # Stricter limit for chat/streaming endpoints (POST to /chat or /stream)
+  #   chat:
+  #     windowMs: 60000
+  #     maxRequests: 10
+
+# ---- Server ----
+server:
+  # Express "trust proxy" setting (passed to app.set('trust proxy', ...)).
+  # Keep false when not behind a reverse proxy.
+  # Use 1 when running behind one trusted proxy (Nginx/ALB/Ingress/Cloudflare).
+  # You may also use true, an IP/subnet string, or array (Express semantics).
+  trustProxy: false
+
+# ---- Authentication ----
+# Credentials (domain, clientId, audience) go in .env as VITE_AUTH_* vars
+auth:
+  enabled: false
+
+# ---- Header ----
+header:
+  enabled: false
+  # Supports HTTPS URL or local file path.
+  # Local file paths can be absolute or relative to orbitchat.yaml.
+  # Example: "./public/logo.png" or "/home/ubuntu/assets/logo.png"
+  # Legacy/fallback logo (used when theme-specific logo is not set)
+  logoUrl: ""
+  # Theme-specific logos (optional).
+  # If empty/whitespace, defaults are used from public/:
+  #   logoUrlLight -> /orbit-logo-light.png
+  #   logoUrlDark  -> /orbit-logo-dark.png
+  # (same location as favicon.svg)
+  logoUrlLight: ""
+  logoUrlDark: ""
+  # Logo dimensions (optional). Controls the rendered CSS size of the logo.
+  # Accepts any valid CSS size string, e.g.:
+  #   "40px", "2.5rem", "2.2em", "auto", "clamp(32px, 4vw, 48px)"
+  # Include units for numeric values ("px", "rem", "em", etc.); avoid bare numbers like "4".
+  # Defaults: logoHeight "2.5rem" (≈40px), logoWidth "auto".
+  logoHeight: ""
+  logoWidth: ""
+  bgColor: ""
+  textColor: ""
+  showBorder: true
+  navLinks: []
+  # navLinks:
+  #   - label: "Home"
+  #     url: "/"
+  #   - label: "About"
+  #     url: "/about"
+
+# ---- Footer ----
+footer:
+  enabled: false
+  text: ""
+  bgColor: ""
+  textColor: ""
+  showBorder: false
+  layout: "stacked" # "stacked" | "inline"
+  align: "center" # "center" | "left"
+  topPadding: "large" # "large" | "normal"
+  navLinks: []
+
+# ---- Startup Scripts (optional) ----
+# Inject external JavaScript tags into <head> during app initialization.
+# Useful for analytics, ads, tag managers, etc.
+# Each item must include either `src` or inline `content`.
+# startupScripts:
+#   - src: "https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"
+#     id: "ga-loader"
+#     async: true
+#   - id: "ga-bootstrap"
+#     content: |
+#       window.dataLayer = window.dataLayer || [];
+#       function gtag(){dataLayer.push(arguments);}
+#       gtag('js', new Date());
+#       gtag('config', 'G-XXXXXXXXXX');
+#   - src: "https://example.com/custom-sdk.js"
+#     async: true
+#     defer: false
+#     crossOrigin: "anonymous" # "anonymous" | "use-credentials"
+#     referrerPolicy: "strict-origin-when-cross-origin"
+#     integrity: ""
+startupScripts: []
+
+# ---- Adapters (metadata + URLs — API keys go in VITE_ADAPTER_KEYS env var) ----
+# Each adapter must have a unique `id` to match its API key in VITE_ADAPTER_KEYS.
+# The `name` is a display-only label and can be changed freely without affecting the key mapping.
+adapters:
+  - id: "simple-chat"
+    name: "Simple Chat"
+    apiUrl: "http://localhost:3000"
+    description: "Basic chat interface using the default conversational agent."
+    inputPlaceholder: "Simple chat, ask anything..."
+  - id: "chat-with-files"
+    name: "Chat With Files"
+    apiUrl: "http://localhost:3000"
+    description: "Supports chatting with document uploads and multimodal queries."

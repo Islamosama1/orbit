@@ -1,0 +1,269 @@
+# Adapter Configuration Management
+
+## Overview
+
+ORBIT supports external adapter configuration files to make adapter management more maintainable. This allows you to separate adapter definitions from the main configuration file, making it easier to manage large numbers of adapters.
+
+## Configuration Structure
+
+### Main Configuration File (`config.yaml`)
+
+Add an import statement at the top of your main configuration file:
+
+```yaml
+# Import external configuration files
+import: "adapters.yaml"
+
+general:
+  port: 3000
+  verbose: true
+  # ... other general settings
+  adapter: "qa-vector-chroma"  # Specify which adapter to use by default
+```
+
+### Adapter Configuration File (`adapters.yaml`)
+
+Create a separate file for all your adapter definitions:
+
+```yaml
+# Adapter configurations for ORBIT
+# This file contains all adapter definitions and can be imported by config.yaml
+
+adapters:
+  - name: "qa-sql"
+    enabled: true
+    type: "retriever"
+    datasource: "sqlite"
+    adapter: "qa"
+    implementation: "retrievers.implementations.qa.QASSQLRetriever"
+    config:
+      confidence_threshold: 0.3
+      max_results: 5
+      return_results: 3
+      # ... other config options
+
+  - name: "qa-vector-chroma"
+    enabled: false
+    type: "retriever"
+    datasource: "chroma"
+    adapter: "qa"
+    implementation: "retrievers.implementations.qa.QAChromaRetriever"
+    config:
+      confidence_threshold: 0.3
+      distance_scaling_factor: 200.0
+      embedding_provider: null
+      max_results: 5
+      return_results: 3
+
+  # ... more adapters
+```
+
+### The `enabled` Parameter
+
+Each adapter can include an `enabled` parameter to control whether it's loaded and available:
+
+- `enabled: true` - The adapter will be loaded and available for use
+- `enabled: false` - The adapter will be skipped during loading
+- If not specified, defaults to `enabled: true`
+
+This allows you to keep adapter configurations in your file while controlling which ones are active without removing them.
+
+## Import Features
+
+### Multiple Import Files
+
+You can import multiple files by specifying them as a list:
+
+```yaml
+import: 
+  - "adapters.yaml"
+  - "custom-adapters.yaml"
+  - "experimental-adapters.yaml"
+```
+
+### Nested Imports
+
+Imported files can also contain their own import statements, allowing for hierarchical configuration:
+
+```yaml
+# adapters.yaml
+import: "vector-adapters.yaml"
+
+adapters:
+  - name: "qa-sql"
+    # ... sql adapter config
+```
+
+```yaml
+# vector-adapters.yaml
+adapters:
+  - name: "qa-vector-chroma"
+    # ... vector adapter config
+```
+
+### Configuration Precedence
+
+When importing multiple files, the configuration follows these precedence rules:
+
+1. **Main config file** - Highest precedence
+2. **Last imported file** - Second highest precedence  
+3. **First imported file** - Lowest precedence
+
+This means that if the same adapter is defined in multiple files, the definition in the main config file will take precedence.
+
+## Benefits
+
+### Maintainability
+- **Separation of Concerns**: Keep adapter configurations separate from system settings
+- **Easier Management**: Large adapter configurations don't clutter the main config
+- **Version Control**: Track adapter changes independently
+
+### Organization
+- **Logical Grouping**: Group related adapters in separate files
+- **Team Collaboration**: Different teams can manage different adapter files
+- **Environment-Specific**: Use different adapter files for different environments
+
+### Scalability
+- **Modular Design**: Add new adapters without touching the main config
+- **Reusability**: Share adapter configurations across projects
+- **Testing**: Test adapter configurations in isolation
+
+## Best Practices
+
+### File Organization
+```
+config/
+├── config.yaml          # Main configuration
+├── adapters.yaml        # Production adapters
+├── dev-adapters.yaml    # Development adapters
+└── test-adapters.yaml   # Test adapters
+```
+
+### Naming Conventions
+- Use descriptive file names: `production-adapters.yaml`, `qa-adapters.yaml`
+- Include environment or purpose in the filename
+- Use consistent naming patterns across your organization
+
+### Version Control
+- Commit adapter files separately from main config
+- Use meaningful commit messages for adapter changes
+- Consider using branches for experimental adapter configurations
+
+### Documentation
+- Document the purpose of each adapter file
+- Include comments explaining complex adapter configurations
+- Maintain a README for the configuration structure
+
+## Migration from Single File
+
+If you're migrating from a single `config.yaml` file:
+
+1. **Extract adapters**: Move the `adapters:` section to `adapters.yaml`
+2. **Add import**: Add `import: "adapters.yaml"` to the top of `config.yaml`
+3. **Test**: Verify that all adapters are loaded correctly
+4. **Remove old section**: Delete the original `adapters:` section from `config.yaml`
+
+## Troubleshooting
+
+### Import File Not Found
+```
+WARNING - Import file not found: /path/to/adapters.yaml
+```
+- Check that the file path is correct relative to the main config file
+- Ensure the file exists and has proper permissions
+
+### Configuration Conflicts
+If you see unexpected behavior after importing:
+- Check for duplicate adapter names across imported files
+- Verify configuration precedence rules
+- Use the configuration summary logs to see which adapters are loaded
+
+### Performance Considerations
+- Import processing happens at startup
+- Large numbers of imported files may impact startup time
+- Consider caching strategies for frequently changing adapter configurations
+
+---
+
+## Runtime Model Selection
+
+By default, an adapter always uses the model defined in its `inference_provider` and `model` fields. The optional `allowed_models` field lets clients request a different model at runtime by passing a `"model"` key in the chat request body.
+
+### Adapter configuration
+
+```yaml
+adapters:
+  - name: "simple-chat"
+    enabled: true
+    type: "passthrough"
+    inference_provider: "openai"
+    model: "gpt-4o-mini"          # Default / fallback model
+
+    allowed_models:               # Optional — omit to lock the adapter to its default model
+      - name: "openai-gpt-4o-mini"
+        provider: "openai"
+        model: "gpt-4o-mini"
+      - name: "anthropic-claude-haiku"
+        provider: "anthropic"
+        model: "claude-haiku-4-5-20251001"
+      - name: "ollama-llama3"
+        provider: "ollama"
+        model: "llama3:8b"
+```
+
+Each entry in `allowed_models` has three fields:
+
+| Field | Description |
+|---|---|
+| `name` | Client-facing identifier sent as the `"model"` value in the request body |
+| `provider` | Internal provider key (must match a key under `inference:` in `inference.yaml`) |
+| `model` | Actual model name passed to the provider |
+
+**Behaviour rules:**
+- If `allowed_models` is defined and the client sends a `"model"` value not in the list, the request is rejected with HTTP 400.
+- If `allowed_models` is defined and the client omits `"model"`, the adapter's default `model` is used.
+- If `allowed_models` is not defined at all, any `"model"` value in the request is silently ignored and the adapter's default is used.
+
+### Discovering available models
+
+**List all models an adapter accepts:**
+```bash
+curl -s http://localhost:3000/admin/adapters/simple-chat/models \
+  -H "X-API-Key: <YOUR_API_KEY>" | jq .
+```
+
+```json
+{
+  "adapter_name": "simple-chat",
+  "has_restrictions": true,
+  "models": [
+    { "name": "openai-gpt-4o-mini",     "provider": "openai",     "model": "gpt-4o-mini" },
+    { "name": "anthropic-claude-haiku", "provider": "anthropic",  "model": "claude-haiku-4-5-20251001" },
+    { "name": "ollama-llama3",          "provider": "ollama",     "model": "llama3:8b" }
+  ]
+}
+```
+
+When `has_restrictions` is `false`, the adapter has no `allowed_models` list and the single default model is returned.
+
+**List all models available across all enabled providers:**
+```bash
+curl -s http://localhost:8000/admin/models \
+  -H "X-API-Key: <YOUR_API_KEY>" | jq .
+```
+
+### Sending a request with a model override
+
+```bash
+curl -s http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <YOUR_API_KEY>" \
+  -H "X-Session-ID: local-test" \
+  -d '{
+    "model": "anthropic-claude-haiku",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }' | jq .
+```
+
+Omit `"model"` (or set it to `null`) to use the adapter's configured default. 

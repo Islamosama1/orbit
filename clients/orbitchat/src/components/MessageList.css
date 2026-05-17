@@ -1,0 +1,227 @@
+.orbit-gradient-logo {
+  filter: brightness(0) saturate(100%);
+  -webkit-filter: brightness(0) saturate(100%);
+}
+
+.orbit-gradient-logo {
+  filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.5));
+  background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  mix-blend-mode: screen;
+}
+
+.message-list {
+  /* Prevent scroll animation conflicts during streaming */
+  scroll-behavior: auto;
+  /* Prevent layout shifts from causing scroll jumps */
+  overflow-anchor: auto;
+  --orbit-assistant-bubble-max: 100%;
+  --orbit-user-bubble-max: min(100%, 72%);
+  --orbit-markdown-max: 100%;
+}
+
+.message-list .message-bubble {
+  width: 100%;
+  max-width: var(--orbit-assistant-bubble-max);
+}
+
+.message-list .message-bubble.message-bubble-user {
+  width: auto;
+  max-width: var(--orbit-user-bubble-max);
+  margin-left: auto;
+}
+
+.message-list .message-markdown {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin-left: 0;
+  margin-right: 0;
+  font-size: clamp(1rem, 0.97rem + 0.22vw, 1.125rem);
+  line-height: 1.75;
+  /* Avoid container-level horizontal scrollbar; let child content own overflow */
+  overflow-x: visible;
+  -webkit-overflow-scrolling: touch;
+}
+
+.message-list .message-bubble.message-bubble-user .message-markdown {
+  font-size: clamp(0.98rem, 0.95rem + 0.16vw, 1.0625rem);
+  line-height: 1.7;
+}
+
+.message-list .message-markdown p,
+.message-list .message-markdown li,
+.message-list .message-markdown blockquote {
+  max-width: 72ch;
+}
+
+.message-list .message-bubble-assistant .message-markdown p,
+.message-list .message-bubble-assistant .message-markdown li,
+.message-list .message-bubble-assistant .message-markdown blockquote {
+  max-width: 84ch;
+}
+
+.message-list .message-markdown h1,
+.message-list .message-markdown h2,
+.message-list .message-markdown h3 {
+  line-height: 1.2;
+}
+
+/* Hide scrollbar on mobile for cleaner look, but keep functionality */
+@media (max-width: 767px) {
+  .message-list {
+    --orbit-assistant-bubble-max: 100%;
+    --orbit-user-bubble-max: min(100%, 92%);
+    --orbit-markdown-max: 100%;
+  }
+
+  .message-list .message-markdown {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+    overflow-x: visible;
+  }
+
+  .message-list .message-markdown::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .message-list .message-markdown::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .message-list .message-markdown::-webkit-scrollbar-thumb {
+    background-color: rgba(128, 128, 128, 0.3);
+    border-radius: 2px;
+  }
+
+  /* Ensure charts, tables, and pre blocks can scroll */
+  .message-list .message-markdown pre,
+  .message-list .message-markdown table,
+  .message-list .message-markdown .recharts-wrapper,
+  .message-list .message-markdown svg {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* Give charts some breathing room */
+  .message-list .message-markdown .recharts-wrapper {
+    min-width: 300px;
+  }
+}
+
+@media (min-width: 768px) {
+  .message-list {
+    --orbit-assistant-bubble-max: 100%;
+    --orbit-user-bubble-max: min(100%, 70%);
+    --orbit-markdown-max: 100%;
+  }
+
+  .message-list .message-markdown {
+    max-width: var(--orbit-markdown-max);
+    overflow-x: visible;
+  }
+}
+
+@media (min-width: 1280px) {
+  .message-list {
+    --orbit-user-bubble-max: min(100%, 68%);
+  }
+}
+
+/* Blinking cursor shown at the end of streaming assistant messages */
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.streaming-cursor::after {
+  content: '▍';
+  display: inline;
+  animation: blink-cursor 1s step-end infinite;
+  color: currentColor;
+  margin-left: 1px;
+  font-weight: 400;
+}
+
+/* Thread replies scroll container */
+.thread-replies-scroll {
+  max-height: 60vh;
+  overflow-y: auto;
+  scroll-behavior: auto;
+  overflow-anchor: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+}
+
+.thread-replies-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.thread-replies-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thread-replies-scroll::-webkit-scrollbar-thumb {
+  background-color: rgba(128, 128, 128, 0.3);
+  border-radius: 2px;
+}
+
+/* Thread markdown wrapper - ensures consistent horizontal scrolling for tables and wide content */
+.thread-markdown-wrapper {
+  width: 100%;
+  min-width: 0;
+  overflow-x: visible;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  font-size: 0.975rem;
+  line-height: 1.65;
+}
+
+/* Ensure tables in threads have proper styling */
+.thread-markdown-wrapper th,
+.thread-markdown-wrapper td {
+  min-width: 12rem;
+  vertical-align: top;
+}
+
+.thread-markdown-wrapper .markdown-content table,
+.thread-markdown-wrapper table {
+  overflow-x: auto !important;
+  scrollbar-gutter: auto;
+}
+
+.thread-markdown-wrapper .markdown-content {
+  overflow: visible; /* Prevent container-level scrollbar above thread composer */
+}
+
+.thread-markdown-wrapper .markdown-content table::-webkit-scrollbar,
+.thread-markdown-wrapper table::-webkit-scrollbar {
+  height: 8px;
+}
+
+.thread-markdown-wrapper .markdown-content table::-webkit-scrollbar-track,
+.thread-markdown-wrapper table::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.14);
+  border-radius: 999px;
+}
+
+.thread-markdown-wrapper .markdown-content table::-webkit-scrollbar-thumb,
+.thread-markdown-wrapper table::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 999px;
+}
+
+.dark .thread-markdown-wrapper .markdown-content table::-webkit-scrollbar-track,
+.dark .thread-markdown-wrapper table::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.dark .thread-markdown-wrapper .markdown-content table::-webkit-scrollbar-thumb,
+.dark .thread-markdown-wrapper table::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.thread-markdown-wrapper .prose {
+  max-width: 100%;
+}
